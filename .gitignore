@@ -1,0 +1,29 @@
+# media and generated work - never commit client footage, scraped photos or renders
+*.mp4
+*.mov
+*.mp3
+*.m4a
+*.wav
+*.jpg
+*.jpeg
+*.png
+work/
+seg_*/
+clips*/
+photos/
+src/
+vo/
+reels/
+
+# secrets
+.env
+*.key
+*token*
+*secret*
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
