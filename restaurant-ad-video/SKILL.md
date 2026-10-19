@@ -1,6 +1,7 @@
 ---
 name: restaurant-ad-video
 description: Make a short vertical video ad (Instagram/TikTok reel, "spot publicitaire") for a restaurant, café or food business from its real Google Maps photos - scrape the photos, pick the dishes, animate each photo with an AI video model (Kling, Seedance, HeyGen via OpenRouter), and cut a 9:16 reel with dish captions and prices, voiceover, music and an end card. Use this whenever someone shares a Google Maps link to a restaurant or food place and wants an ad, promo video, reel, or "something to pitch the owner", or asks to compare AI video models (Kling vs Seedance) on food shots.
+compatibility: Needs an OpenRouter API key with ~$10 of credit (OPENROUTER_API_KEY) and an Apify account token (APIFY_TOKEN, free tier is enough), python3, curl, internet.
 ---
 
 # Restaurant ad video
@@ -8,10 +9,24 @@ description: Make a short vertical video ad (Instagram/TikTok reel, "spot public
 Real food photos in, a 20-30 s 9:16 ad out. The pipeline: **scrape photos -> pick and crop
 dishes -> animate each photo -> voiceover + music -> assemble with captions and an end card.**
 
-Keys come from the environment: `OPENROUTER_API_KEY` (video, voice, music) and `APIFY_TOKEN`
-(photos). Never write them into files or a repo; if the user pastes one, use it only in the
-command and suggest rotating it afterwards. Check the OpenRouter key's remaining budget before
-generating (`gen_clips.py` prints it). Running out mid-batch leaves half a set.
+## Requirements (check these before starting)
+
+| need | what for | how to get it | cost |
+|---|---|---|---|
+| **OpenRouter account + API key** -> `OPENROUTER_API_KEY` | AI video clips (Kling/Seedance/HeyGen), voiceover (ElevenLabs), music (Lyria) | openrouter.ai -> add credits -> Settings -> Keys | ~$5 per ad with Kling; keep **~$10** available so a batch can finish, plus a re-roll |
+| **Apify account + API token** -> `APIFY_TOKEN` | scraping all of the restaurant's Google Maps photos | apify.com -> sign up -> Settings -> API & Integrations -> copy the token | ~$0.15 per restaurant; the **free plan ($5/month credit)** covers it |
+| python3 + curl | scripts, setup | preinstalled on macOS/Linux | free |
+
+**Why Apify:** Google shows logged-out browsers a "limited view" with ~6 photos and no gallery.
+Apify's scraper gets the full gallery (~120 of 136 photos in testing). Without an Apify token,
+fall back to photos the user or restaurant provides (better for a paid ad anyway): put them in
+`photos/` as `001.jpg`, `002.jpg`… and continue from step 2.
+
+If a key is missing, ask the user for it before any paid step and say what it's for and what
+it'll cost. Check the OpenRouter key's remaining budget before generating (`gen_clips.py`
+prints it): a 403 "Key limit exceeded" mid-batch leaves half a set, and the fix is for the user
+to raise the key's limit. Never write keys into files or a repo; if the user pastes one, use it
+only in the command and suggest rotating it afterwards.
 
 ## 0. Setup
 ```bash

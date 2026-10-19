@@ -1,6 +1,7 @@
 ---
 name: video-highlights
 description: Turn a long video (YouTube link, podcast, interview, talk, livestream) into short highlight edits - a dramatic trailer, a chaptered 5-minute TL;DR, or vertical 9:16 Instagram/TikTok reels with word-by-word karaoke subtitles and a face-tracked crop. Use this whenever someone wants to clip, recap, summarize, cut down, or "make reels/shorts/a trailer/a TL;DR/the best parts" from a long video or podcast episode, in any language (works well for Arabic/Tunisian derja and other right-to-left scripts), even if they only paste a YouTube URL and say "make something from this".
+compatibility: Needs an OpenRouter API key with a few dollars of credit (OPENROUTER_API_KEY), python3, curl, internet. No Apify needed.
 ---
 
 # Video highlights
@@ -9,9 +10,24 @@ Long video in, short edits out. The pipeline is: **download -> transcribe with w
 -> let an LLM propose moments -> you check the cut points -> render**. Every step is a script in
 `scripts/`; your job is to run them, review the picks like an editor, and check the output.
 
-All paid calls go through OpenRouter with `OPENROUTER_API_KEY` from the environment. Never
-write a key into a file, plan, or repo; if the user pastes one, use it via `export` in the
-command only and suggest they rotate it afterwards.
+## Requirements (check these before starting)
+
+| need | what for | how to get it | cost |
+|---|---|---|---|
+| **OpenRouter account + API key** -> `OPENROUTER_API_KEY` | transcription (Scribe v2), moment picking (Gemini), music (Lyria) | sign up at openrouter.ai, add credits, create a key under Settings -> Keys | ~$0.40 for an 80-min episode; $5 of credit is plenty |
+| python3 + curl | scripts, setup | preinstalled on macOS/Linux | free |
+| internet access | YouTube download, API calls | | |
+
+**Not needed**: Apify (yt-dlp downloads for free and is much faster), a GPU, or a system
+ffmpeg (setup.sh installs a bundled one).
+
+If `OPENROUTER_API_KEY` isn't set, ask the user for it before doing anything paid. Explain
+that it's a pay-as-you-go key and that a spending limit on the key is a good safety net. If a
+call fails with 403 "Key limit exceeded", the key's limit is used up: ask the user to raise it
+(the key itself still works). Everything else (download, render, face crop) runs locally and free.
+
+Never write a key into a file, plan, or repo. If the user pastes one, use it via `export` in
+the command only, and suggest rotating it afterwards since it's now in the chat history.
 
 ## 0. Setup (once per machine)
 

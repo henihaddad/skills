@@ -25,12 +25,25 @@ Then one-time setup (Python venv + verified yt-dlp + ffmpeg):
 bash ~/code/skills/video-highlights/scripts/setup.sh
 ```
 
-## Keys
+## Requirements and keys
+
+| | `video-highlights` | `restaurant-ad-video` | where to get it |
+|---|---|---|---|
+| **OpenRouter API key** `OPENROUTER_API_KEY` | required (~$0.40 per episode) | required (~$5 per ad, keep ~$10 of credit) | [openrouter.ai](https://openrouter.ai) -> add credits -> Settings -> Keys |
+| **Apify token** `APIFY_TOKEN` | not needed | required for Google Maps photos (free plan is enough) | [apify.com](https://apify.com) -> Settings -> API & Integrations |
+| python3, curl | yes | yes | preinstalled on macOS / Linux |
+
+Everything else (yt-dlp, ffmpeg, OpenCV, Arabic text shaping) is installed by `setup.sh`.
 
 The scripts read keys from the environment and never store them:
 
-- `OPENROUTER_API_KEY` for transcription, LLM picks, video, voice and music ([openrouter.ai](https://openrouter.ai))
-- `APIFY_TOKEN` for Google Maps photos, restaurant skill only ([apify.com](https://apify.com))
+```bash
+export OPENROUTER_API_KEY=sk-or-...   # put it in your shell profile or a local .env, never in the repo
+export APIFY_TOKEN=apify_api_...
+```
+
+Tip: set a spending limit on the OpenRouter key. If you hit it, calls fail with 403 "Key limit
+exceeded"; raise the limit and re-run (finished clips are cached and skipped).
 
 ## Costs (typical)
 
