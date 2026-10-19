@@ -33,10 +33,12 @@ ap.add_argument('plan')
 ap.add_argument('--source', required=True)
 ap.add_argument('--work', default='work')
 ap.add_argument('--verify', action='store_true')
-ap.add_argument('--cameras', type=int, default=2)
+ap.add_argument('--cameras', type=int, default=0, help='camera angles for --verify (0 = auto)')
 ap.add_argument('--cut-threshold', type=float, default=20)
 ap.add_argument('--prefer', choices=['closeup', 'left', 'right', 'largest', 'most'], default='closeup',
-                help='which face to follow in wide shots with two people (default: the side the close-ups use)')
+                help='which face to follow in wide shots with two people when nothing else decides it')
+ap.add_argument('--angle-x', default='', help='force a crop per camera angle, e.g. "2=200,0=1100" (face-centre x in '
+                'source pixels); angle numbers and previews are printed/saved by the angle pass')
 a = ap.parse_args()
 FF = ffmpeg_path()
 S = load(os.path.join(a.work, 'transcript.json'))['sents']
@@ -53,10 +55,9 @@ CW = int(round(SH * 9 / 16 / 2) * 2)          # crop width for 9:16 at full heig
 def window(it):
     if 'start' in it:
         return it['start'], it['end'] - it['start']
-    st = it.get('start_time') or S[it['start_idx']][0] - 0.12
-    en = S[it['end_idx']][1] + 0.3
-    if it.get('end_time'):
-        en = it['end_time']
+    i, j = it['start_idx'], it['end_idx']
+    st = it.get('start_time') or max(S[i][0] - 0.12, (S[i - 1][1] + 0.02) if i > 0 else 0)
+    en = it.get('end_time') or min(S[j][1] + 0.3, (S[j + 1][0] - 0.03) if j + 1 < len(S) else 1e9)
     return st, en - st
 
 def decode(st, du, vf, w, h, pix='gray', ch=1):
@@ -93,10 +94,15 @@ def plan_clip(st, du, key):
     g = fr[:, ::10, ::10].mean(axis=3)
     d = np.abs(np.diff(g, axis=0)).mean(axis=(1, 2))
     cuts = [i + 1 for i, v in enumerate(d) if v > a.cut_threshold]
-    bounds = [0] + cuts + [len(fr)]; shots, wide = [], []
+    bounds = [0] + cuts + [len(fr)]; shots, wide, thumbs = [], [], []
     for s0, s1 in zip(bounds, bounds[1:]):
         idx = sorted(set(np.linspace(s0, s1 - 1, min(9, s1 - s0)).astype(int)))
-        dets = [x for i in idx for x in faces(fr[i])]
+        thumbs.append(np.round(np.mean([cv2.resize(fr[i], (32, 18), interpolation=cv2.INTER_AREA) for i in idx], axis=0) / 255, 3).ravel().tolist())
+        dets = []
+        for i in idx:
+            fd = faces(fr[i])
+            if fd:   # a gesturing hand or a logo is smaller than the real face(s) in the same frame
+                big = max(w for _, w in fd); dets += [d for d in fd if d[1] >= big * 0.6]
         if not dets:
             shots.append([int(s0), None]); continue
         cl = [c for c in split_people(dets) if c[1] >= 2] or split_people(dets)
@@ -126,12 +132,8 @@ def plan_clip(st, du, key):
         if s[1] is None:
             cand = [(np.abs(g[s[0]] - g[o[0]]).mean(), o[1]) for o in shots if o[1] is not None]
             s[1] = min(cand)[1] if cand else SW / 2
-    merged = []
-    for s in shots:
-        if merged and abs(merged[-1][1] - s[1]) < SW * 0.06:
-            continue
-        merged.append(s)
-    return merged, len(fr)
+    # keep every cut: merging "similar" shots once dropped a real cut and cropped onto the table
+    return shots, len(fr), thumbs
 
 def crop_x(cx):
     return int(min(SW - CW, max(0, cx - CW / 2)))
@@ -142,7 +144,30 @@ def crop_expr(shots):
         ex = f'if(lt(n,{shots[i + 1][0]}),{crop_x(shots[i][1])},{ex})'
     return ex
 
+def kmeans_auto(Xs, fixed=0):
+    """k-means++ with restarts; k = `fixed`, or the smallest k in 2..5 after which more clusters stop helping."""
+    Xs = np.asarray(Xs, float)
+    def run(k, seed):
+        rng = np.random.default_rng(seed); c = [Xs[rng.integers(len(Xs))]]
+        for _ in range(k - 1):
+            d2 = np.min(((Xs[:, None] - np.stack(c)[None]) ** 2).sum(2), axis=1) + 1e-12
+            c.append(Xs[rng.choice(len(Xs), p=d2 / d2.sum())])
+        c = np.stack(c)
+        for _ in range(30):
+            lab = ((Xs[:, None] - c[None]) ** 2).sum(2).argmin(1)
+            c = np.stack([Xs[lab == j].mean(0) if (lab == j).any() else c[j] for j in range(k)])
+        return c, ((Xs - c[lab]) ** 2).sum()
+    ks = [fixed] if fixed else [k for k in (2, 3, 4, 5) if k <= len(Xs)] or [1]
+    fits = {k: min((run(k, sd) for sd in range(5)), key=lambda r: r[1]) for k in ks}
+    K = ks[0]
+    for k in ks[1:]:
+        if fits[k][1] < fits[K][1] * 0.7:
+            K = k
+    return fits[K][0]
+
 out_path = os.path.join(a.work, 'faces.json')
+th_path = os.path.join(a.work, 'shot_thumbs.json')
+TH = load(th_path) if os.path.exists(th_path) else {}
 F = load(out_path) if os.path.exists(out_path) else {}
 F.setdefault('_meta', {})['source'] = os.path.abspath(a.source)
 F['_meta'].update({'width': SW, 'height': SH, 'crop_w': CW})
@@ -160,8 +185,49 @@ for it in P['items']:
     if k in F:
         continue
     st, du = window(it)
-    F[k], n = plan_clip(st, du, k)
-    print(k, f'{n} frames', [(f, int(c)) for f, c in F[k]], flush=True)
+    F[k], n, TH[k] = plan_clip(st, du, k)
+    print(k, f'{n} frames', [(f, int(c)) for f, c, *_ in F[k]], flush=True)
+save(TH, th_path)
+
+# ---- camera-angle pass: the same camera should get the same crop in every clip. Face detection can
+# miss someone (profile at the frame edge) and pick the other person in one clip only; and x positions
+# from different cameras aren't comparable. Group shots by angle, report angles with mixed crops.
+keys = [clip_key(it) for it in P['items'] if it['type'] == 'clip']
+rows = [(k, i) for k in keys for i in range(len(F[k])) if k in TH and i < len(TH[k])]
+if len(rows) >= 2:
+    C = kmeans_auto([TH[k][i] for k, i in rows])
+    for (k, i) in rows:
+        ang = int(((np.array(TH[k][i]) - C) ** 2).sum(1).argmin())
+        F[k][i] = F[k][i][:2] + [ang]
+    force = {int(x.split('=')[0]): float(x.split('=')[1]) for x in a.angle_x.split(',') if '=' in x}
+    for k, i in rows:
+        if F[k][i][2] in force:
+            F[k][i][1] = force[F[k][i][2]]
+    for ang in sorted({F[k][i][2] for k, i in rows}):
+        xs = [crop_x(F[k][i][1]) for k, i in rows if F[k][i][2] == ang]
+        groups = []
+        for x in sorted(xs):
+            if groups and x - groups[-1][-1] <= CW * 0.3:
+                groups[-1].append(x)
+            else:
+                groups.append([x])
+        if len(groups) > 1 and ang not in force:
+            # preview: one frame of this angle with every candidate crop drawn on it
+            k0, i0 = next((k, i) for k, i in rows if F[k][i][2] == ang)
+            it0 = next(it for it in P['items'] if it['type'] == 'clip' and clip_key(it) == k0)
+            st0, _ = window(it0)
+            img = decode(st0 + (F[k0][i0][0] + 3) / 29.97, 0.1, f'scale={SW // 4}:{SH // 4}', SW // 4, SH // 4, 'bgr24', 3)[0].copy()
+            cols = [(0, 255, 255), (255, 0, 255), (0, 255, 0), (255, 128, 0)]
+            for gi, g_ in enumerate(groups):
+                x0 = int(statistics.median(g_)) // 4; col = cols[gi % len(cols)]
+                cv2.rectangle(img, (x0 + gi * 2, gi * 2), (x0 + CW // 4 - gi * 2, SH // 4 - 1 - gi * 2), col, 2)
+                lbl = f'x={int(statistics.median(g_) + CW / 2)} ({len(g_)} shots)'
+                cv2.rectangle(img, (4, 6 + gi * 22), (14 + 9 * len(lbl), 26 + gi * 22), (0, 0, 0), -1)
+                cv2.putText(img, lbl, (8, 22 + gi * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+            pv = os.path.join(a.work, f'angle_{ang}.jpg'); cv2.imwrite(pv, img)
+            print(f'  ANGLE {ang}: {len(xs)} shots cropped at {len(groups)} different places '
+                  f'{[(int(statistics.median(g_) + CW / 2), len(g_)) for g_ in groups]} -> look at {pv}; '
+                  f'pick one with --angle-x {ang}=<x> (or keep it if you want to follow the speaker)')
 save(F, out_path)
 print('->', out_path)
 
@@ -175,7 +241,7 @@ if a.verify:
         cr = decode(st, du, f"crop={CW}:{SH}:x='{crop_expr(F[k])}':y=0,scale={cw}:{ch}", cw, ch).astype(float)
         # candidate crop centres = distinct positions used anywhere, compare the real crop to each
         cands = []
-        for x in sorted(crop_x(c) for _, c in F[k]):
+        for x in sorted(crop_x(sh[1]) for sh in F[k]):
             if not cands or x - cands[-1] > CW * 0.3:
                 cands.append(x)
         if len(cands) == 1:                       # single-shot clip: compare against the far side too
@@ -185,10 +251,8 @@ if a.verify:
         th = decode(st, du, 'scale=32:18', 32, 18, 'rgb24', 3).reshape(len(cr), -1).astype(float) / 255
         thumbs.append(th); sides.append(np.array([cands[s] for s in side])); keys.append(k)
     X = np.concatenate(thumbs); side_all = np.concatenate(sides)
-    rng = np.random.default_rng(0); c = X[rng.choice(len(X), a.cameras, replace=False)]
-    for _ in range(30):
-        lab = ((X[:, None] - c[None]) ** 2).sum(2).argmin(1)
-        c = np.stack([X[lab == j].mean(0) if (lab == j).any() else c[j] for j in range(a.cameras)])
+    c = kmeans_auto(X[::max(1, len(X) // 4000)], a.cameras); a.cameras = len(c)
+    lab = ((X[:, None] - c[None]) ** 2).sum(2).argmin(1)
     # each camera angle should always be cropped at (about) the same place
     expect = {j: statistics.median(side_all[lab == j].tolist()) for j in range(a.cameras) if (lab == j).any()}
     bad = np.abs(side_all - np.array([expect[l] for l in lab])) > CW * 0.4
@@ -196,7 +260,8 @@ if a.verify:
     for k, s in zip(keys, sides):
         b = np.where(bad[o:o + len(s)])[0]
         if len(b):
-            print(f'  {k}: suspicious frames {b.tolist()[:30]}')
+            print(f'  {k}: {len(b)} frames cropped differently from other shots of the same camera '
+                  f'(frames {b[0]}-{b[-1]}). Fine if you chose this on purpose (e.g. following the speaker in a wide shot).')
         o += len(s)
     print(f'verify: {len(side_all)} frames through the real crop filter, {int(bad.sum())} mismatches '
           f'(camera angles found: {len(expect)})')

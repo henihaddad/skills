@@ -80,6 +80,23 @@ already in the scripts. If you change the scripts, don't reintroduce these.
 - **Fixing ASR words by hand** meant editing words[] and sents[] separately. Use fix_transcript.py.
 - **Diacritics**: arabic-reshaper deletes harakat by default (لمّا showed as لما). They're kept now.
 
+- **The picker misread sentence indices** (a note about being dismissed over French pointed at «لا لا
+  شوف», 380 sentences away; a 2-s cold open; 205 s of speech for a 5-min target). Picks now carry
+  start/end quotes and are re-anchored by matching them; short clips and low totals are flagged.
+- **Edge padding leaked the next sentence's first word**, while a tight end_time dropped the last
+  word. Padding now stops at neighbouring sentences, and karaoke keeps words starting before the cut.
+- **"2014،"** (Latin digits + Arabic comma) rendered as boxes: digits inside RTL tokens get their own font run.
+- **Merging "similar" shots dropped a real cut** (a wide shot whose between-people median was near
+  the close-up's x), cropping onto a plant. Shots are no longer merged.
+- **A gesturing hand pulled the crop off-centre.** Detections much smaller than the biggest face in the frame are ignored.
+- **Verify's 2-camera k-means was unstable** (0 vs 1,575 false mismatches after removing one clip).
+  Now k-means++ with restarts and an automatic camera count.
+- **Guest in profile at the frame edge** wasn't detected in the wide shot, so the crop followed the
+  host while the guest talked, and x from different cameras was compared. Fix: the camera-angle pass
+  plus `--angle-x`, one decision per camera with a preview image (0 mismatches on 8,361 frames).
+- **Burned-in subtitles** in the source (the show's own captions on teaser moments) stack under ours.
+  Not auto-detected yet; look for them in step 6.
+
 ## Extracting one person (diarization)
 - Speaker labels are only consistent within one request. Send up to 60 min in one diarized request (45 min took 60 s, $0.16).
 - Diarization merged a co-host's voice into the guest's label. Text alone didn't reliably catch it.

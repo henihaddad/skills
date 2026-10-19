@@ -125,6 +125,11 @@ def is_mixed(word):
     they're almost always a transcription error worth fixing in transcript.json."""
     return bool(RTL_RE.search(word) and LATIN_RE.search(word))
 
+def needs_runs(word):
+    """RTL token that also contains Latin letters or digits ("2014،"): draw each script run with its own
+    font, otherwise the Arabic font turns the digits/letters into empty boxes."""
+    return bool(RTL_RE.search(word) and (LATIN_RE.search(word) or re.search('[0-9]', word)))
+
 def script_runs(word):
     """Split a token into runs of RTL vs non-RTL characters, so each run can use a font that has
     its glyphs. Returned in visual left-to-right order for an RTL token."""
@@ -165,7 +170,7 @@ def draw_words(draw, words, y, width, size, active=-1, color='white', hl=(255, 2
     parts = []
     for w in words:
         runs = []
-        for r in (script_runs(w) if is_mixed(w) else [w]):
+        for r in (script_runs(w) if needs_runs(w) else [w]):
             f = font_for(r, size); s = shape(r)
             runs.append((s, f, draw.textlength(s, font=f)))
         parts.append(runs)

@@ -38,7 +38,7 @@ if a.mode == 'trailer':
             'climax -> a short sting that leaves suspense. Also give a title card (name of the guest/topic + a 2-4 word '
             'tagline), one mid card before the climax (e.g. "...and the confrontation"), and an end card (show name + call to action). '
             'Return JSON: {"title":{"main":str,"tagline":str},"mid_card":str,"end_card":{"brand":str,"cta":str},'
-            '"moments":[{"start_idx":int,"end_idx":int,"role":"hook|setup|conflict|climax|sting","english":str}]}')
+            '"moments":[{"start_idx":int,"end_idx":int,"start_quote":str,"end_quote":str,"role":"hook|setup|conflict|climax|sting","english":str}]}')
 else:
     lo, hi = a.minutes * 60 * 0.9, a.minutes * 60
     task = (f'Make a {a.minutes:g}-minute TL;DR: someone who watches only this understands the key topics, the main claims and '
@@ -48,17 +48,55 @@ else:
             f'Total speech {lo:.0f}-{hi:.0f} s. Also pick ONE cold-open line (2-10 s, the strongest single moment) and give a '
             'title card and end card. Return JSON: {"cold_open":{"start_idx":int,"end_idx":int},'
             '"title":{"main":str,"tagline":str,"small":str},"end_card":{"brand":str,"cta":str},'
-            '"chapters":[{"title":str,"title_en":str,"clips":[{"start_idx":int,"end_idx":int,"summary_en":str}]}]}')
+            '"chapters":[{"title":str,"title_en":str,"clips":[{"start_idx":int,"end_idx":int,"start_quote":str,"end_quote":str,"summary_en":str}]}]}')
 
 must = [m.strip() for m in a.must.split(',') if m.strip()]
 must_rule = (f'The edit MUST include at least one strong moment about each of these topics: {"; ".join(must)}. ' if must else '')
+quote_rule = ('For every clip also copy start_quote = the first 6-8 words of sentence start_idx and end_quote = the last '
+              '6-8 words of sentence end_idx, exactly as written in the transcript (they are used to verify the indices). ')
 prompt = (f'You are a senior video editor. Context: {a.context or "an interview/podcast"}.\n'
           'Transcript lines are "[index] start-end text" (index = sentence number).\n'
           f'{task}\n{must_rule}Never use the same sentence twice (the cold open must not reappear inside a chapter clip). '
           'Clips must start at the beginning of a sentence/thought (not on a conjunction such as و/ثم/أن/مع/and/but) '
-          f'and end on a finished sentence.\n{lang_rule}\nReturn ONLY the JSON object.\n\nTRANSCRIPT:\n{tx}')
+          f'and end on a finished sentence. {quote_rule}\n{lang_rule}\nReturn ONLY the JSON object.\n\nTRANSCRIPT:\n{tx}')
 picks, cost = chat_json(a.model, prompt)
 save(picks, os.path.join(a.work, f'picks_{a.mode}.json'))
+
+# --- re-anchor indices with the quotes: models misread sentence numbers (a note about "being
+# dismissed over French" pointed at a sentence saying «لا لا شوف»; the real line was 380 sentences later)
+import re as _re
+def _toks(t):
+    return _re.sub(r'[^\w ]', ' ', _re.sub('[\u064b-\u0652]', '', t)).split()
+def _score(q, k, tail=False):
+    qt, st = _toks(q), _toks(S[k][2])
+    if not qt or not st:
+        return 0
+    st = st[-len(qt) - 2:] if tail else st[:len(qt) + 2]
+    return sum(1 for w in qt if w in st) / len(qt)
+def anchor(c, label):
+    i, j = int(c['start_idx']), int(c['end_idx'])
+    if c.get('start_quote'):
+        if _score(c['start_quote'], i) < 0.6:
+            best = max(range(len(S)), key=lambda k: (_score(c['start_quote'], k), -abs(k - i)))
+            if _score(c['start_quote'], best) >= 0.6:
+                print(f'  re-anchored {label}: start {i} -> {best} (quote "{c["start_quote"][:40]}")'); j += best - i; i = best
+            else:
+                print(f'  !! {label}: start_quote not found anywhere - check this clip by hand'); c['unverified'] = True
+    if c.get('end_quote'):
+        cand = [k for k in range(i, min(len(S), i + 40))]
+        if cand and _score(c['end_quote'], j, True) < 0.6:
+            best = max(cand, key=lambda k: (_score(c['end_quote'], k, True), -abs(k - j)))
+            if _score(c['end_quote'], best, True) >= 0.6:
+                print(f'  re-anchored {label}: end {j} -> {best}'); j = best
+    c['start_idx'], c['end_idx'] = i, max(i, j)
+if a.mode == 'trailer':
+    for n_, m_ in enumerate(picks.get('moments', [])):
+        anchor(m_, f'moment {n_ + 1}')
+else:
+    anchor(picks['cold_open'], 'cold open')
+    for ch_ in picks.get('chapters', []):
+        for n_, c_ in enumerate(ch_['clips']):
+            anchor(c_, f'{ch_["title"]} #{n_ + 1}')
 print(f'model cost ${cost or 0:.3f}')
 
 def clip(i, j, **kw):
@@ -154,4 +192,9 @@ for k, it in enumerate(items):
         print(f'   !! {f}')
 if must:
     print(f"\nRequired topics: {', '.join(must)} - confirm each appears (grep transcript.txt if the picks missed one).")
+short = [it for it in items if it['type'] == 'clip' and S[it['end_idx']][1] - S[it['start_idx']][0] < (8 if a.mode == 'tldr' else 2)]
+if short:
+    print(f'\n!! {len(short)} clip(s) are very short for a {a.mode} (e.g. [{short[0]["start_idx"]}-{short[0]["end_idx"]}]) - extend or replace them')
+if a.mode == 'tldr' and total < a.minutes * 60 * 0.8:
+    print(f'\n!! only {total:.0f}s of speech for a {a.minutes:g}-minute target - add or extend clips')
 print(f'\nspeech total {total:.0f}s -> {out}')

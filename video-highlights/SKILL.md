@@ -104,12 +104,15 @@ $PY $SK/facetrack.py work/plan_tldr.json --source source.mp4 --work work --verif
 $PY $SK/render.py work/plan_tldr.json --source source.mp4 --work work --format 9:16 \
     --brand "<guest> on <show>" --out reels/tldr_vertical.mp4 --split-chapters reels/
 ```
-facetrack finds every camera cut frame-exactly and gives each shot one crop. **Wide shots with two
-people** print `WIDE SHOT ... people at x=[...] -> following x=...`. By default it follows the
-person the clip's close-ups show (usually the guest); `--prefer left|right|largest|most` or an
-edit in `work/faces.json` changes that. Note that a wide shot of the host asking a question will
-then show the guest listening. `--verify` must print **0 mismatches**. It checks every frame
-through the exact crop expression the renderer uses; see lessons.md if it doesn't. Instagram reels
+facetrack finds every camera cut frame-exactly and gives each shot one crop, then groups shots by
+**camera angle** so the same camera gets the same crop in every clip. When an angle was cropped at
+different places (typically a wide two-shot where the detector missed a face in profile at the
+frame edge), it prints `ANGLE n: ... cropped at k different places` and saves `work/angle_n.jpg`
+with the candidate crops drawn. **Look at it** and re-run with `--angle-x n=<x>` (face-centre x
+of the person to follow; usually the guest). Choosing to follow whoever is speaking in a wide shot
+is a valid editorial choice, but verify will then list those frames, which is expected. `--verify`
+must print **0 mismatches** otherwise; it checks every frame through the exact crop expression the
+renderer uses (camera count is automatic). Instagram reels
 max out at 3 min, so long TL;DRs ship as the full vertical file plus one reel per chapter.
 
 ## 6. Look before you hand it over
@@ -122,7 +125,9 @@ speech (compare with `transcript.json` word times, measuring durations from the 
 in `work/seg_*/NNN.mp4`, which are a few hundredths longer than planned); cards readable; music
 present on cards/end card (`$FF -i out.mp4 -af volumedetect -f null -`). For 9:16, pull frames **by index
 right after cuts from the per-clip files** in `work/seg_9x16/` (times on the joined file drift by a
-few frames). You can't hear audio, so tell the user to listen for clipped words and music level.
+few frames). Watch for **subtitles burned into the source** (shows often caption the moments they reuse in
+their teaser): ours would stack on top of them. Pick another clip or another occurrence. You can't
+hear audio, so tell the user to listen for clipped words and music level.
 
 Report: files and durations, the storyline, plan changes you made, cost per step, what you
 verified and what you couldn't. Mention rights: clips of someone else's show are fine as a private

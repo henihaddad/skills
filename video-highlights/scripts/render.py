@@ -60,8 +60,10 @@ def window(it):
     """Clip window in source seconds: sentence indices (+ optional end_time) or absolute start/end."""
     if 'start' in it:
         return it['start'], it['end'] - it['start']
-    st = it.get('start_time') or S[it['start_idx']][0] - 0.12
-    en = it.get('end_time') or S[it['end_idx']][1] + 0.3
+    i, j = it['start_idx'], it['end_idx']
+    # pad the edges, but never into the neighbouring sentence (its first word leaked in otherwise)
+    st = it.get('start_time') or max(S[i][0] - 0.12, (S[i - 1][1] + 0.02) if i > 0 else 0)
+    en = it.get('end_time') or min(S[j][1] + 0.3, (S[j + 1][0] - 0.03) if j + 1 < len(S) else 1e9)
     return st, en - st
 
 def clip_key(it):
@@ -107,7 +109,7 @@ def tag_png(chapter, path):
     im.save(path)
 
 def karaoke(st, du, k):
-    words = [[w[0], w[1], clean_token(w[2])] for w in WD if st - 0.01 <= w[0] < st + du - 0.2]
+    words = [[w[0], w[1], clean_token(w[2])] for w in WD if st - 0.01 <= w[0] < st + du - 0.05]
     words = [w for w in words if w[2]]
     chunks, cur = [], []
     for w in words:
@@ -174,7 +176,7 @@ for k, it in enumerate(P['items']):
         else:
             ff('-loop', 1, '-t', du, '-i', f'{SEG}/{k:03d}.png', '-f', 'lavfi', '-t', du, '-i', 'anullsrc=r=44100:cl=stereo',
                '-vf', vf, '-c:v', 'libx264', '-crf', 18, '-c:a', 'aac', '-shortest', o)
-        spans.append((t, t + du)); t += du
+        spans.append((t, t + du)); t += duration(o)
     else:
         st, du = window(it); lst = karaoke(st, du, k)
         tg = f'{SEG}/tag{k:03d}.png'; tag_png(it.get('chapter'), tg)
@@ -185,7 +187,7 @@ for k, it in enumerate(P['items']):
            f"[1:v]format=rgba,setpts=PTS-STARTPTS[s];[v][s]overlay=0:0:eof_action=repeat[v2];[v2][2:v]overlay=0:0,format=yuv420p[vo];"
            f"[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.15,afade=t=in:d=0.08,afade=t=out:st={du - 0.18:.2f}:d=0.18[ao]",
            '-map', '[vo]', '-map', '[ao]', '-c:v', 'libx264', '-crf', 20 if V else 19, '-c:a', 'aac', '-ar', 44100, o)
-        t += du
+        t += duration(o)      # real segment length; planned lengths drift ~0.4 s over 4 min
     segs.append(o); print(f'{k:3d} {it["type"]:5s} -> {t:6.1f}s', flush=True)
 
 def join(seglist, out, bed=False, total=None):
