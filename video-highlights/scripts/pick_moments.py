@@ -19,7 +19,8 @@ ap.add_argument('work')
 ap.add_argument('--mode', choices=['trailer', 'tldr'], required=True)
 ap.add_argument('--context', default='', help='who is speaking, show name, what the episode is about')
 ap.add_argument('--minutes', type=float, default=5, help='tldr target length')
-ap.add_argument('--skip-start', type=float, default=120, help='seconds of built-in teaser/intro to avoid')
+ap.add_argument('--skip-start', type=float, default=120, help='seconds of the show\'s own teaser/intro to avoid (check transcript.txt: often 60-120 s)')
+ap.add_argument('--must', default='', help='comma-separated topics the edit must cover, e.g. "Karbala, Shiism is not an accusation"')
 ap.add_argument('--model', default='google/gemini-3.5-flash')
 ap.add_argument('--out', default=None)
 a = ap.parse_args()
@@ -49,9 +50,13 @@ else:
             '"title":{"main":str,"tagline":str,"small":str},"end_card":{"brand":str,"cta":str},'
             '"chapters":[{"title":str,"title_en":str,"clips":[{"start_idx":int,"end_idx":int,"summary_en":str}]}]}')
 
+must = [m.strip() for m in a.must.split(',') if m.strip()]
+must_rule = (f'The edit MUST include at least one strong moment about each of these topics: {"; ".join(must)}. ' if must else '')
 prompt = (f'You are a senior video editor. Context: {a.context or "an interview/podcast"}.\n'
-          'Transcript lines are "[index] mm:ss.ss-ss.ss text" (index = sentence number).\n'
-          f'{task}\n{lang_rule}\nReturn ONLY the JSON object.\n\nTRANSCRIPT:\n{tx}')
+          'Transcript lines are "[index] start-end text" (index = sentence number).\n'
+          f'{task}\n{must_rule}Never use the same sentence twice (the cold open must not reappear inside a chapter clip). '
+          'Clips must start at the beginning of a sentence/thought (not on a conjunction such as و/ثم/أن/مع/and/but) '
+          f'and end on a finished sentence.\n{lang_rule}\nReturn ONLY the JSON object.\n\nTRANSCRIPT:\n{tx}')
 picks, cost = chat_json(a.model, prompt)
 save(picks, os.path.join(a.work, f'picks_{a.mode}.json'))
 print(f'model cost ${cost or 0:.3f}')
@@ -72,6 +77,10 @@ if a.mode == 'trailer':
             items.append(card([{'text': t.get('main', ''), 'role': 'title'}, {'text': t.get('tagline', ''), 'role': 'subtitle'}], 2.6))
         if m.get('role') == 'climax' and picks.get('mid_card') and not any(i.get('mid') for i in items):
             items.insert(len(items) - 1, {**card([{'text': picks['mid_card'], 'role': 'subtitle'}], 1.6), 'mid': True})
+    if picks.get('mid_card') and not any(i.get('mid') for i in items) and len(ms) > 4:
+        # no moment tagged "climax": put the mid card before the last third of the trailer
+        cut = [k for k, i in enumerate(items) if i['type'] == 'clip'][-max(2, len(ms) // 3)]
+        items.insert(cut, {**card([{'text': picks['mid_card'], 'role': 'subtitle'}], 1.6), 'mid': True})
     items.append(card([{'text': e.get('brand', ''), 'role': 'brand'}, {'text': e.get('cta', ''), 'role': 'cta'}], 3.6))
     plan = {'mode': 'trailer', 'format': '16:9', 'music': 'music.mp3', 'music_mode': 'bed', 'items': items}
 else:
@@ -89,15 +98,41 @@ else:
 out = a.out or os.path.join(a.work, f'plan_{a.mode}.json')
 save(plan, out)
 
-# boundary report: the part you must eyeball
-total = 0
-for it in items:
+# boundary report: the part you must eyeball. Flags are heuristics - read the text too.
+import re
+from common import ts, is_mixed
+END_P = re.compile(r'[.!?؟。…]["»”]?$')
+CONJ = re.compile(r'^(و|ف|ثم|أن|ان|إن|مع|لكن|بل|أو|او|and|but|so|or|that|then)\b', re.I)
+total, used = 0, {}
+for k, it in enumerate(items):
     if it['type'] != 'clip':
         print(f"\n== CARD {' / '.join(l['text'] for l in it['lines'] if l['text'])}"); continue
     i, j = it['start_idx'], it['end_idx']; d = S[j][1] - S[i][0]; total += d
-    print(f"\n[{i}-{j}] {int(S[i][0] // 60):02d}:{S[i][0] % 60:04.1f} ({d:.0f}s) {it.get('note', '')}")
+    flags = []
+    if i > 0 and not END_P.search(S[i - 1][2]) or CONJ.match(S[i][2]):
+        flags.append('STARTS MID-THOUGHT? (previous sentence unfinished or starts with a conjunction) -> try start_idx-1')
+    if not END_P.search(S[j][2]):
+        flags.append('ENDS MID-SENTENCE? -> try end_idx+1')
+    if S[j][2].rstrip().endswith(('?', '؟')):
+        flags.append('ENDS ON A QUESTION -> include the answer (end_idx+1..)')
+    for x in range(i, j + 1):
+        if x in used:
+            flags.append(f'DUPLICATE: sentence {x} is also in item {used[x]}')
+            break
+    for x in range(i, j + 1):
+        used.setdefault(x, k)
+    if a.skip_start and S[i][0] < a.skip_start:
+        flags.append("INSIDE THE SHOW'S TEASER -> use the original occurrence later in the episode")
+    bad = [w[2] for w in T['words'] if S[i][0] - 0.01 <= w[0] <= S[j][1] and is_mixed(w[2])]
+    if bad:
+        flags.append(f'MIXED-SCRIPT TOKENS {bad} -> fix the spelling in transcript.json')
+    print(f"\n[{i}-{j}] {ts(S[i][0])}-{ts(S[j][1])} ({d:.0f}s) {it.get('note', '')}")
     print(f"   START: {S[i][2][:120]}")
     print(f"   END:   ...{S[j][2][-120:]}")
-    if j + 1 < len(S):
-        print(f"   NEXT:  {S[j + 1][2][:100]}   <- if END is a question and NEXT answers it, extend end_idx")
+    if j + 1 < len(S) and (flags and any(f.startswith(('ENDS', )) for f in flags)):
+        print(f"   NEXT:  {S[j + 1][2][:100]}")
+    for f in flags:
+        print(f'   !! {f}')
+if must:
+    print(f"\nRequired topics: {', '.join(must)} - confirm each appears (grep transcript.txt if the picks missed one).")
 print(f'\nspeech total {total:.0f}s -> {out}')

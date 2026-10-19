@@ -35,6 +35,8 @@ ap.add_argument('--work', default='work')
 ap.add_argument('--verify', action='store_true')
 ap.add_argument('--cameras', type=int, default=2)
 ap.add_argument('--cut-threshold', type=float, default=20)
+ap.add_argument('--prefer', choices=['closeup', 'left', 'right', 'largest', 'most'], default='closeup',
+                help='which face to follow in wide shots with two people (default: the side the close-ups use)')
 a = ap.parse_args()
 FF = ffmpeg_path()
 S = load(os.path.join(a.work, 'transcript.json'))['sents']
@@ -49,6 +51,8 @@ SW, SH = src_dims()
 CW = int(round(SH * 9 / 16 / 2) * 2)          # crop width for 9:16 at full height
 
 def window(it):
+    if 'start' in it:
+        return it['start'], it['end'] - it['start']
     st = S[it['start_idx']][0] - 0.12
     en = S[it['end_idx']][1] + 0.3
     if it.get('end_time'):
@@ -70,18 +74,54 @@ def faces(bgr):                                   # bgr is 960x540
     for c in cas + [pro]:
         out += list(c.detectMultiScale(g, 1.08, 5, minSize=(70, 70)))
     out += [(960 - x - w, y, w, h) for x, y, w, h in pro.detectMultiScale(cv2.flip(g, 1), 1.08, 5, minSize=(70, 70))]
-    return [(x + w / 2) * SW / 960 for x, y, w, h in out if y + h / 2 < 300]
+    return [((x + w / 2) * SW / 960, w) for x, y, w, h in out if y + h / 2 < 300]
 
-def plan_clip(st, du):
+def split_people(dets):
+    """1-D clustering of face centres in a shot. Returns [(centre, n, mean_width), ...]; more than
+    one cluster means a wide shot with several people (a single median would land between them)."""
+    xs = sorted(dets)
+    groups = [[xs[0]]]
+    for d in xs[1:]:
+        if d[0] - groups[-1][-1][0] > CW * 0.5:
+            groups.append([d])
+        else:
+            groups[-1].append(d)
+    return [(statistics.median(x for x, _ in g), len(g), sum(w for _, w in g) / len(g)) for g in groups]
+
+def plan_clip(st, du, key):
     fr = decode(st, du, 'scale=960:540', 960, 540, 'bgr24', 3)
     g = fr[:, ::10, ::10].mean(axis=3)
     d = np.abs(np.diff(g, axis=0)).mean(axis=(1, 2))
     cuts = [i + 1 for i, v in enumerate(d) if v > a.cut_threshold]
-    bounds = [0] + cuts + [len(fr)]; shots = []
+    bounds = [0] + cuts + [len(fr)]; shots, wide = [], []
     for s0, s1 in zip(bounds, bounds[1:]):
         idx = sorted(set(np.linspace(s0, s1 - 1, min(9, s1 - s0)).astype(int)))
-        xs = [x for i in idx for x in faces(fr[i])]
-        shots.append([int(s0), statistics.median(xs) if xs else None])
+        dets = [x for i in idx for x in faces(fr[i])]
+        if not dets:
+            shots.append([int(s0), None]); continue
+        cl = [c for c in split_people(dets) if c[1] >= 2] or split_people(dets)
+        if len(cl) == 1:
+            shots.append([int(s0), cl[0][0]])
+        else:
+            shots.append([int(s0), cl]); wide.append(len(shots) - 1)
+    # wide shots: choose one person
+    singles = [s[1] for s in shots if isinstance(s[1], float)]
+    for k in wide:
+        cl = shots[k][1]
+        if a.prefer == 'left':
+            pick = min(cl, key=lambda c: c[0])
+        elif a.prefer == 'right':
+            pick = max(cl, key=lambda c: c[0])
+        elif a.prefer == 'largest':
+            pick = max(cl, key=lambda c: c[2])
+        elif a.prefer == 'most' or not singles:
+            pick = max(cl, key=lambda c: c[1])
+        else:   # closeup: the person the close-up shots of this clip show (usually the guest)
+            ref = statistics.median(singles)
+            pick = min(cl, key=lambda c: abs(c[0] - ref))
+        print(f'  WIDE SHOT in {key} at frame {shots[k][0]}: people at x={[int(c[0]) for c in cl]} -> following x={int(pick[0])} '
+              f'(--prefer {a.prefer}; edit faces.json to follow someone else)')
+        shots[k][1] = pick[0]
     for s in shots:
         if s[1] is None:
             cand = [(np.abs(g[s[0]] - g[o[0]]).mean(), o[1]) for o in shots if o[1] is not None]
@@ -106,14 +146,20 @@ out_path = os.path.join(a.work, 'faces.json')
 F = load(out_path) if os.path.exists(out_path) else {}
 F.setdefault('_meta', {})['source'] = os.path.abspath(a.source)
 F['_meta'].update({'width': SW, 'height': SH, 'crop_w': CW})
+def clip_key(it):
+    """Cache key. Includes end_time so trimming a clip re-plans its crop instead of reusing a stale one."""
+    if 'start' in it:
+        return f"t{it['start']:.2f}-{it['end']:.2f}"
+    return f"{it['start_idx']}-{it['end_idx']}" + (f"@{it['end_time']}" if it.get('end_time') else '')
+
 for it in P['items']:
     if it['type'] != 'clip':
         continue
-    k = f"{it['start_idx']}-{it['end_idx']}"
+    k = clip_key(it)
     if k in F:
         continue
     st, du = window(it)
-    F[k], n = plan_clip(st, du)
+    F[k], n = plan_clip(st, du, k)
     print(k, f'{n} frames', [(f, int(c)) for f, c in F[k]], flush=True)
 save(F, out_path)
 print('->', out_path)
@@ -123,7 +169,7 @@ if a.verify:
     for it in P['items']:
         if it['type'] != 'clip':
             continue
-        k = f"{it['start_idx']}-{it['end_idx']}"; st, du = window(it)
+        k = clip_key(it); st, du = window(it)
         cw, ch = 19, 34
         cr = decode(st, du, f"crop={CW}:{SH}:x='{crop_expr(F[k])}':y=0,scale={cw}:{ch}", cw, ch).astype(float)
         # candidate crop centres = distinct positions used anywhere, compare the real crop to each

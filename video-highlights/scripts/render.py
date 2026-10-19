@@ -25,7 +25,7 @@ What you get:
 """
 import argparse, os, re
 from PIL import Image, ImageDraw
-from common import ff, load, clean_token, draw_words, centred, font, shape, is_rtl, duration
+from common import ff, load, clean_token, draw_words, centred, font, shape, is_rtl, duration, last_loud
 
 ap = argparse.ArgumentParser()
 ap.add_argument('plan')
@@ -57,9 +57,17 @@ if V:
     FACES = load(fp); SW, SH, CW = FACES['_meta']['width'], FACES['_meta']['height'], FACES['_meta']['crop_w']
 
 def window(it):
+    """Clip window in source seconds: sentence indices (+ optional end_time) or absolute start/end."""
+    if 'start' in it:
+        return it['start'], it['end'] - it['start']
     st = S[it['start_idx']][0] - 0.12
     en = it.get('end_time') or S[it['end_idx']][1] + 0.3
     return st, en - st
+
+def clip_key(it):
+    if 'start' in it:
+        return f"t{it['start']:.2f}-{it['end']:.2f}"
+    return f"{it['start_idx']}-{it['end_idx']}" + (f"@{it['end_time']}" if it.get('end_time') else '')
 
 def card_png(lines, path):
     im = Image.new('RGB', (W, H), 'black'); d = ImageDraw.Draw(im)
@@ -73,7 +81,9 @@ def card_png(lines, path):
         role = l.get('role', 'title'); size = ROLE[role][1 if V else 0]; col = l.get('color') or ROLE[role][2]
         if role == 'number' and rtl_doc and t.isdigit():
             t = ''.join(EASTERN[int(c)] for c in t)
-        kind = 'serif' if (role == 'brand' and not is_rtl(t)) else ('rtl' if is_rtl(t) else 'latin')
+        # RTL lines go word by word (kind=None) so digits/Latin/"·" get a font that has them;
+        # rendering a whole Arabic line in the Arabic font turns "4" or "·" into empty boxes.
+        kind = 'serif' if (role == 'brand' and not is_rtl(t)) else (None if is_rtl(t) else 'latin')
         centred(d, y, t, size, W, fill=col, kind=kind)
         y += size * 1.5
     im.save(path)
@@ -131,9 +141,9 @@ def karaoke(st, du, k):
 
 def crop_filter(it, k):
     if V:
-        shots = FACES.get(f"{it['start_idx']}-{it['end_idx']}")
+        shots = FACES.get(clip_key(it))
         if not shots:
-            raise SystemExit(f"faces.json has no entry for clip {it['start_idx']}-{it['end_idx']}; re-run facetrack.py")
+            raise SystemExit(f"faces.json has no entry for clip {clip_key(it)}; re-run facetrack.py")
         X = lambda c: int(min(SW - CW, max(0, c - CW / 2)))
         ex = str(X(shots[-1][1]))
         for i in range(len(shots) - 2, -1, -1):
@@ -184,7 +194,9 @@ def join(seglist, out, bed=False, total=None):
     tmp = out + '.tmp.mp4'
     ff('-f', 'concat', '-safe', 0, '-i', lst, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', tmp)
     if bed and music:
-        off = max(0, mlen - total)            # line the track's ending up with the end card
+        # line the track's last LOUD moment up with the end of the video: generated tracks end with
+        # seconds of silent fade, and aligning the file end left the end card with no music
+        off = max(0, last_loud(music) - total)
         loud = '+'.join(f'between(t,{s0:.2f},{s1:.2f})' for s0, s1 in spans) or '0'
         ff('-i', tmp, '-ss', f'{off:.2f}', '-i', music, '-filter_complex',
            f"[1:a]aresample=44100,volume='if({loud},0.9,0.22)':eval=frame,afade=t=in:d=1[m];[0:a]volume=1.0[d];"

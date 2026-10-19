@@ -1,146 +1,153 @@
 ---
 name: video-highlights
-description: Turn a long video (YouTube link, podcast, interview, talk, livestream) into short highlight edits - a dramatic trailer, a chaptered 5-minute TL;DR, or vertical 9:16 Instagram/TikTok reels with word-by-word karaoke subtitles and a face-tracked crop. Use this whenever someone wants to clip, recap, summarize, cut down, or "make reels/shorts/a trailer/a TL;DR/the best parts" from a long video or podcast episode, in any language (works well for Arabic/Tunisian derja and other right-to-left scripts), even if they only paste a YouTube URL and say "make something from this".
-compatibility: Needs an OpenRouter API key with a few dollars of credit (OPENROUTER_API_KEY), python3, curl, internet. No Apify needed.
+description: Turn a long video (YouTube link, podcast, interview, talk show, livestream) into short edits - a dramatic trailer, a chaptered 5-minute TL;DR, vertical 9:16 Instagram/TikTok reels with word-by-word karaoke subtitles and a face-tracked crop, or a compilation of every moment one specific person speaks. Use this whenever someone wants to clip, recap, summarize, cut down, "make reels/shorts/a trailer/a TL;DR/the best parts", or "extract all of X's interventions" from a long video or podcast episode, in any language (works well for Arabic/Tunisian derja and other right-to-left scripts), even if they only paste a YouTube URL and say "make something from this".
+compatibility: Needs an OpenRouter API key with a few dollars of credit (OPENROUTER_API_KEY), python3, curl, internet, ~2 GB free disk per episode. No Apify needed.
 ---
 
 # Video highlights
 
-Long video in, short edits out. The pipeline is: **download -> transcribe with word timestamps
--> let an LLM propose moments -> you check the cut points -> render**. Every step is a script in
-`scripts/`; your job is to run them, review the picks like an editor, and check the output.
+Long video in, short edits out: **download -> transcribe with word timestamps -> an LLM
+proposes moments -> you review cut points like an editor -> render -> look at the result.**
+Each step is a script; your job is the judgement in between.
 
-## Requirements (check these before starting)
+```bash
+SK=<this skill's folder>/scripts          # e.g. ~/.claude/skills/video-highlights/scripts
+PY=~/.cache/video-skills/venv/bin/python
+FF=~/.cache/video-skills/bin/ffmpeg      # the same ffmpeg the scripts use
+```
+Run every script as `$PY $SK/<name>.py ...` from a project folder (scripts live in the skill
+folder, outputs go wherever you run them).
 
-| need | what for | how to get it | cost |
+## Requirements (check before starting)
+
+| need | for | how | cost |
 |---|---|---|---|
-| **OpenRouter account + API key** -> `OPENROUTER_API_KEY` | transcription (Scribe v2), moment picking (Gemini), music (Lyria) | sign up at openrouter.ai, add credits, create a key under Settings -> Keys | ~$0.40 for an 80-min episode; $5 of credit is plenty |
-| python3 + curl | scripts, setup | preinstalled on macOS/Linux | free |
-| internet access | YouTube download, API calls | | |
+| **OpenRouter key** `OPENROUTER_API_KEY` | transcription (Scribe v2), moment picking (Gemini), music (Lyria) | openrouter.ai -> credits -> Settings -> Keys | ~$0.60 for a 90-min episode, trailer + TL;DR; $5 of credit is plenty |
+| python3, curl, ~2 GB disk | scripts, 1080p source | preinstalled on macOS/Linux | free |
 
-**Not needed**: Apify (yt-dlp downloads for free and is much faster), a GPU, or a system
-ffmpeg (setup.sh installs a bundled one).
-
-If `OPENROUTER_API_KEY` isn't set, ask the user for it before doing anything paid. Explain
-that it's a pay-as-you-go key and that a spending limit on the key is a good safety net. If a
-call fails with 403 "Key limit exceeded", the key's limit is used up: ask the user to raise it
-(the key itself still works). Everything else (download, render, face crop) runs locally and free.
-
-Never write a key into a file, plan, or repo. If the user pastes one, use it via `export` in
-the command only, and suggest rotating it afterwards since it's now in the chat history.
+Not needed: Apify, a GPU, a system ffmpeg. If the key is missing, ask for it before any paid
+step and say what it costs. A 403 "Key limit exceeded" means the key's spending limit is used
+up: ask the user to raise it (finished steps are cached). Never write a key into a file, plan or
+repo; if the user pastes one, use it inline (`export` in the command) and suggest rotating it later.
 
 ## 0. Setup (once per machine)
-
 ```bash
-bash scripts/setup.sh        # venv with pillow/numpy/opencv/arabic-reshaper + checksum-verified yt-dlp
-PY=~/.cache/video-skills/venv/bin/python
+$PY -c "import cv2, arabic_reshaper, PIL" 2>/dev/null && echo ready || bash $SK/setup.sh
 ```
-
-Run every script below with `$PY scripts/<name>.py` from a working folder for the project.
+Don't run two setup.sh at once (parallel pip installs collide); if another agent is setting up, wait for the check above to pass.
 
 ## 1. Download
-
 ```bash
-$PY scripts/download.py "<url>" --out source.mp4 --height 1080
+$PY $SK/download.py "<url>" --out source.mp4 --height 1080
 ```
-
-Use 1080p if reels (9:16) are in scope; a vertical crop keeps only ~32% of the width. yt-dlp
-is free and takes ~1 minute for an 80-minute episode. Apify-style paid downloaders are slower
-and charge per MB; only use one if the user insists.
+1080p if any 9:16 reel is planned (a vertical crop keeps ~32% of the width); 720p is enough for
+16:9 only. ~2-4 min and 1.2-2 GB for 70-100 min. It prefers H.264 so the source previews in
+QuickTime. Ignore the yt-dlp "No supported JavaScript runtime" warning.
 
 ## 2. Transcribe
-
 ```bash
-$PY scripts/transcribe.py source.mp4 --out work --lang ar     # omit --lang to auto-detect
+$PY $SK/transcribe.py source.mp4 --out work --lang ar            # add --diarize for speaker labels
 ```
-
-ElevenLabs Scribe v2 via OpenRouter: ~$0.11 per hour, word-level timestamps, handles
-dialect and code-switching. Produces `work/transcript.json` (words + sentences) and
-`work/transcript.txt` (`[idx] mm:ss.ss-ss.ss text`). Sentence indices are how plans refer to clips.
+Scribe v2, **~$0.22 per hour**, word timestamps. 10-min chunks with a 4 s overlap (no lost words at
+seams); changing settings clears the cache automatically. Output: `work/transcript.json` and
+`work/transcript.txt` (`[idx] mm:ss.ss-mm:ss.ss text`; line N is sentence index N, 0-based).
+What to expect: Scribe leans toward standard spelling. Derja is understood but often written more
+formally, French words may come out in Latin letters, names are spelled roughly. **Check names
+before putting them on cards.** The script lists mixed Arabic+Latin tokens (e.g. "الوسلati") - ASR
+errors that render badly. To fix a word, edit it in `transcript.json` `words` (and the matching
+`sents` text) in your work folder.
 
 ## 3. Pick moments
-
-Give a one-line `--context` (show, host, guest, topic): it makes titles and picks much better.
-
+Look at the first lines of transcript.txt: shows often open with their own teaser of the best
+lines. Set `--skip-start` to its length so picks use the original, later occurrence.
 ```bash
-$PY scripts/pick_moments.py work --mode trailer --context "..."   # ~75-90 s, 10-14 punchy moments
-$PY scripts/pick_moments.py work --mode tldr --minutes 5 --context "..."   # chapters, 10-40 s clips
+$PY $SK/pick_moments.py work --mode trailer --context "<show, host, guest, topic>" --skip-start 70 --must "topic A, topic B"
+$PY $SK/pick_moments.py work --mode tldr --minutes 5 --context "..." --skip-start 70 --must "..."
 ```
+(The work folder is a positional argument here.) Gemini 3.5 Flash reads the whole transcript
+(~$0.13-0.19) and writes `work/plan_<mode>.json` plus a **boundary report** with `!!` flags:
+starts mid-thought, ends mid-sentence, ends on a question without the answer, duplicate
+sentences (e.g. the cold open reappearing in a chapter), clips inside the teaser, mixed-script
+tokens. Treat every flag as a decision to make, then also read the clips themselves:
 
-Gemini 3.5 Flash reads the whole transcript (~$0.15 for 80 min) and writes
-`work/plan_<mode>.json` plus a **boundary report**. Read that report yourself - this is the
-editorial step the model gets wrong most often:
+- `--must` topics are requested, not guaranteed. If one is missing, grep transcript.txt and add it.
+- A clip that ends on the interviewer's question: extend to include the answer.
+- The interviewer's pushback ("now you're accusing", "show your proof") is what makes moments feel like a confrontation. Keep it.
+- Trailer arc: hook (strongest line) -> title card -> setup -> escalating conflict -> mid card -> climax -> short sting -> end card, 75-90 s.
+- TL;DR: 10-40 s clips so arguments make sense, 5-7 chapters, cold open not repeated later.
 
-- A clip that ends on the interviewer's question (`لماذا؟`, "why?") without the answer: extend `end_idx`.
-- A clip that starts mid-thought: move `start_idx` back one sentence.
-- The episode's own teaser in the first ~2 minutes repeats the best lines; prefer the original later occurrence.
-- For a trailer, the hook (first clip) should be the single strongest line; end on a short sting.
-
-Edit the plan JSON directly (`start_idx`, `end_idx`, card `lines`, `chapter`); `end_time`
-(absolute seconds) trims a clip mid-sentence when needed. Show the user the storyline
-(one line per clip, translated if the content isn't in their language) before rendering a long edit.
+Edit the plan JSON directly: `start_idx`/`end_idx`, `end_time` (absolute seconds, to trim
+mid-sentence), card `lines`, `chapter`. Clips can also be absolute: `{"type":"clip","start":812.4,"end":840.1}`.
+For a long edit, show the user the storyline (one line per clip, translated) before rendering.
 
 ## 4. Music (optional)
-
 ```bash
-$PY scripts/music.py "90-second dark tense documentary trailer score, pulsing bass, impact hits, builds to a climax, final boom" --out music.mp3
+$PY $SK/music.py "90-second dark tense documentary trailer score, pulsing bass, impact hits, builds to a climax, final boom" --out work/music.mp3
 ```
-
-Lyria 3 Pro, ~$0.08. Trailers use `music_mode: "bed"` (low under dialogue, loud on cards,
-ending aligned to the end card). Long TL;DRs read better with `"cards"` (music only on title
-cards, clean dialogue). Set `"music": null` to skip.
+Lyria 3 Pro, ~$0.08 (printed). The file must sit next to the plan (`"music": "music.mp3"` is
+relative to the plan's folder). Trailers: `music_mode: "bed"` (low under dialogue, loud on cards;
+the track's last *audible* moment is aligned with the end, so the end card has music). TL;DRs:
+`"cards"` (music only on title cards). `"music": null` to skip.
 
 ## 5. Render
-
 ```bash
-# 16:9 trailer or TL;DR
-$PY scripts/render.py work/plan_trailer.json --source source.mp4 --work work --out trailer.mp4
+$PY $SK/render.py work/plan_trailer.json --source source.mp4 --work work --out trailer.mp4
 
-# 9:16 reels: plan the crop first, verify it, then render + split per chapter
-$PY scripts/facetrack.py work/plan_tldr.json --source source.mp4 --work work --verify
-$PY scripts/render.py work/plan_tldr.json --source source.mp4 --work work --format 9:16 \
-    --brand "<guest> on <show>" --out tldr_vertical.mp4 --split-chapters reels/
+# 9:16: plan the crop, verify, then render + split per chapter (one reel each)
+$PY $SK/facetrack.py work/plan_tldr.json --source source.mp4 --work work --verify
+$PY $SK/render.py work/plan_tldr.json --source source.mp4 --work work --format 9:16 \
+    --brand "<guest> on <show>" --out reels/tldr_vertical.mp4 --split-chapters reels/
 ```
+facetrack finds every camera cut frame-exactly and gives each shot one crop. **Wide shots with two
+people** print `WIDE SHOT ... people at x=[...] -> following x=...`. By default it follows the
+person the clip's close-ups show (usually the guest); `--prefer left|right|largest|most` or an
+edit in `work/faces.json` changes that. Note that a wide shot of the host asking a question will
+then show the guest listening. `--verify` must print **0 mismatches**. It checks every frame
+through the exact crop expression the renderer uses; see lessons.md if it doesn't. Instagram reels
+max out at 3 min, so long TL;DRs ship as the full vertical file plus one reel per chapter.
 
-`facetrack.py --verify` must print **0 mismatches**. It checks every frame through the exact
-crop expression the renderer uses. If it doesn't, read `references/lessons.md` (face crop section).
-
-Instagram reels max out at 3 minutes, so a 5-minute TL;DR goes out as the full vertical file
-(for TikTok/Shorts) **plus** one reel per chapter.
-
-## 6. Check before you hand it over
-
-Don't claim it's done from logs alone. Extract a handful of frames and look at them:
-
+## 6. Look before you hand it over
+Logs aren't proof. Extract frames and look at them:
 ```bash
-FF=~/.cache/video-skills/bin/ffmpeg
 for t in 2 10 30 60; do $FF -v error -y -ss $t -i trailer.mp4 -frames:v 1 -vf scale=480:-2 f$t.jpg; done
 ```
+Check: subtitles render (no empty boxes, RTL text joined and in order); the yellow word matches the
+speech (compare with `transcript.json` word times, measuring durations from the real per-clip files
+in `work/seg_*/NNN.mp4`, which are a few hundredths longer than planned); cards readable; music
+present on cards/end card (`$FF -i out.mp4 -af volumedetect -f null -`). For 9:16, pull frames **by index
+right after cuts from the per-clip files** in `work/seg_9x16/` (times on the joined file drift by a
+few frames). You can't hear audio, so tell the user to listen for clipped words and music level.
 
-Check: subtitles render (no empty boxes, RTL text joined and in the right order), the
-highlighted word matches speech (compare a frame's time with `transcript.json` words), and in
-9:16 the speaker's face is centred, especially in frames right after camera cuts. You can't
-hear the audio, so tell the user to listen for clipped words and music level.
+Report: files and durations, the storyline, plan changes you made, cost per step, what you
+verified and what you couldn't. Mention rights: clips of someone else's show are fine as a private
+test or pitch; publishing needs the owner's permission.
 
-Report: file paths, durations, the storyline, cost per step, and anything you couldn't verify.
-Mention rights: clips of someone else's show are fine as a private test or pitch, but publishing
-needs the owner's permission.
+## Mode: every moment of one person
+"Extract all of X's interventions/interactions" needs speaker labels, and diarization alone
+isn't enough: it merges similar voices (a co-host came back labelled as the guest).
+```bash
+$PY $SK/transcribe.py source.mp4 --out work --lang ar --diarize     # one request up to 60 min keeps labels consistent
+$PY $SK/extract_speaker.py work --source source.mp4 --sheet         # work/speakers.jpg: frames per speaker number
+$PY $SK/extract_speaker.py work --source source.mp4 --shots         # work/shots.jpg: numbered camera shots
+#   -> LOOK at both images: which speaker number is X, which shot numbers show X's close-up
+$PY $SK/extract_speaker.py work --source source.mp4 --speaker 2 --target-shots 2,10 \
+    --who "Name (الاسم), role, how they look" --context "<show, other people>"
+$PY $SK/render.py work/plan_speaker.json --source source.mp4 --work work --out x_compilation.mp4
+```
+The LLM re-labels each of X's turns using who was just addressed, content, and the screen hint
+(long turns where none of X's shots is on screen), and groups chapters. The compilation keeps X's
+turns, the question leading into each (last 20 s), and short back-and-forths; long monologues by
+others are left out. Fill in the title/end card text in plan_speaker.json. **Watch the
+stretches where turns were relabelled** (printed) - that's where mistakes hide. ~$0.30 for 45 min.
 
-## Costs seen in practice (80-minute episode)
-
+## Costs seen in practice
 | step | tool | cost |
 |---|---|---|
 | download | yt-dlp | free |
-| transcript | Scribe v2 | ~$0.15 |
-| moment picking | Gemini 3.5 Flash | ~$0.15-0.18 per mode |
+| transcript | Scribe v2 | ~$0.22/hour (+ diarization: same) |
+| moment picking / speaker relabel | Gemini 3.5 Flash | ~$0.13-0.19 per run |
 | music | Lyria 3 Pro | ~$0.08 |
-| render, face crop | local ffmpeg/OpenCV | free |
+| render, face crop | local | free |
 
-## Variations users ask for
-
-- **"Make the subtitles nicer"** - karaoke is the default; tweak colours/size in `render.py` (`SUB_SIZE`, `hl` colour in `common.draw_words`).
-- **Shorter reels** - drop clips from a chapter in the plan, or `--mode trailer` and render 9:16.
-- **English subtitles under Arabic** - translate sentence text with a chat model and add a second overlay line; keep the karaoke line on top.
-
-Read `references/lessons.md` when something looks wrong. It lists every bug hit while building
-this (font boxes, off-by-one crop flashes, timeouts, music silently missing) with the fix.
+Read `references/lessons.md` when something looks wrong. It lists every bug hit so far (font boxes,
+crop flashes, wide shots, music tails, diarization merges) and the fix.

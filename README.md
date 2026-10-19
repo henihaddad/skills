@@ -6,7 +6,7 @@ Agent skills for [Claude Code](https://claude.com/claude-code) and other agents 
 
 | skill | what it does |
 |---|---|
-| [`video-highlights`](video-highlights/) | Long video or podcast (e.g. a YouTube link) -> transcript with word timestamps -> best moments -> **trailer**, **chaptered TL;DR**, and **9:16 reels** with word-by-word karaoke subtitles (RTL/Arabic aware) and a frame-exact face-tracked crop. |
+| [`video-highlights`](video-highlights/) | Long video or podcast (e.g. a YouTube link) -> transcript with word timestamps -> best moments -> **trailer**, **chaptered TL;DR**, **9:16 reels** with word-by-word karaoke subtitles (RTL/Arabic aware) and a frame-exact face-tracked crop, or a **compilation of every moment one person speaks** (diarization + on-screen check + LLM relabel). |
 | [`restaurant-ad-video`](restaurant-ad-video/) | A restaurant's Google Maps photos -> pick dishes -> animate with Kling / Seedance / HeyGen -> **9:16 ad reel** with dish captions, prices, voiceover, music and an end card. Includes a model comparison workflow. |
 
 ## Install
@@ -29,7 +29,7 @@ bash ~/code/skills/video-highlights/scripts/setup.sh
 
 | | `video-highlights` | `restaurant-ad-video` | where to get it |
 |---|---|---|---|
-| **OpenRouter API key** `OPENROUTER_API_KEY` | required (~$0.40 per episode) | required (~$5 per ad, keep ~$10 of credit) | [openrouter.ai](https://openrouter.ai) -> add credits -> Settings -> Keys |
+| **OpenRouter API key** `OPENROUTER_API_KEY` | required (~$0.60 per 90-min episode) | required (~$5 per ad, keep ~$10 of credit) | [openrouter.ai](https://openrouter.ai) -> add credits -> Settings -> Keys |
 | **Apify token** `APIFY_TOKEN` | not needed | required for Google Maps photos (free plan is enough) | [apify.com](https://apify.com) -> Settings -> API & Integrations |
 | python3, curl | yes | yes | preinstalled on macOS / Linux |
 
@@ -47,7 +47,8 @@ exceeded"; raise the limit and re-run (finished clips are cached and skipped).
 
 ## Costs (typical)
 
-- 80-minute podcast -> trailer + TL;DR + 6 reels: **~$0.40**
+- 90-minute podcast -> trailer + TL;DR + reels: **~$0.60**
+- 45-minute talk show -> every moment of one guest: **~$0.30**
 - restaurant ad with 8 AI-animated dishes: **~$5**
 
 ## Responsible use

@@ -8,11 +8,14 @@ words inside Tunisian derja), because most Arabic system fonts have no Latin gly
 import json, os, re, shutil, subprocess, sys, urllib.request, urllib.error
 
 # ---------------------------------------------------------------- ffmpeg
+SKILLS_HOME = os.environ.get('VIDEO_SKILLS_HOME', os.path.expanduser('~/.cache/video-skills'))
+
 def ffmpeg_path():
-    """ffmpeg from $FFMPEG, PATH, or the imageio-ffmpeg wheel installed by setup.sh."""
-    p = os.environ.get('FFMPEG') or shutil.which('ffmpeg')
-    if p:
-        return p
+    """ffmpeg from $FFMPEG, the setup.sh link (~/.cache/video-skills/bin/ffmpeg), PATH, or imageio-ffmpeg.
+    The setup.sh link comes first so the scripts and the commands in SKILL.md use the same binary."""
+    for p in (os.environ.get('FFMPEG'), os.path.join(SKILLS_HOME, 'bin', 'ffmpeg'), shutil.which('ffmpeg')):
+        if p and os.path.exists(p):
+            return p
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
@@ -39,6 +42,19 @@ def ff_stderr(*args):
 def duration(path):
     m = re.search(r'Duration: (\d+):(\d+):([\d.]+)', ff_stderr('-i', path))
     return int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]) if m else 0.0
+
+def ts(sec):
+    """mm:ss.ss (or h:mm:ss.ss) - used for both start and end so ranges never look wrapped."""
+    h, rem = divmod(sec, 3600); m, s = divmod(rem, 60)
+    return f'{int(h)}:{int(m):02d}:{s:05.2f}' if h else f'{int(m):02d}:{s:05.2f}'
+
+def last_loud(path, noise_db=-35):
+    """Time where a music file's audible content ends (generated tracks often finish with seconds of
+    silent fade). Aligning THIS point, not the file end, to the end card keeps music under it."""
+    d = duration(path)
+    starts = re.findall(r'silence_start: ([\d.]+)', ff_stderr('-i', path, '-af', f'silencedetect=n={noise_db}dB:d=0.5', '-f', 'null', '-'))
+    tail = [float(s) for s in starts if float(s) > d * 0.6]
+    return min(tail) if tail else d
 
 # ---------------------------------------------------------------- OpenRouter
 API = 'https://openrouter.ai/api/v1'
@@ -100,6 +116,17 @@ def shape(t):
     from bidi.algorithm import get_display
     return get_display(arabic_reshaper.reshape(t))
 
+def is_mixed(word):
+    """ASR sometimes glues Arabic and Latin letters into one token ("الوسلati"). Report these:
+    they're almost always a transcription error worth fixing in transcript.json."""
+    return bool(RTL_RE.search(word) and LATIN_RE.search(word))
+
+def script_runs(word):
+    """Split a token into runs of RTL vs non-RTL characters, so each run can use a font that has
+    its glyphs. Returned in visual left-to-right order for an RTL token."""
+    runs = [m.group(0) for m in re.finditer(r'[֐-ࣿיִ-﷿ﹰ-﻿]+|[^֐-ࣿיִ-﷿ﹰ-﻿]+', word)]
+    return list(reversed(runs)) if is_rtl(word) else runs
+
 FONT_CANDIDATES = {
     'rtl':   [('/System/Library/Fonts/GeezaPro.ttc', 1), ('/System/Library/Fonts/Supplemental/Damascus.ttc', 0),
               ('/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf', 0), ('/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf', 0),
@@ -126,20 +153,30 @@ def font_for(word, size):
     return font('latin', size) if (LATIN_RE.search(word) or not is_rtl(word)) else font('rtl', size)
 
 def draw_words(draw, words, y, width, size, active=-1, color='white', hl=(255, 210, 60), stroke=5):
-    """Draw a single line of words centred at y, highlighting words[active]. Handles RTL order."""
+    """Draw a single line of words centred at y, highlighting words[active]. Handles RTL order and
+    tokens that mix scripts (each run is drawn with a font that has its glyphs)."""
     rtl = any(is_rtl(w) for w in words)
-    shaped = [shape(w) for w in words]
-    fonts = [font_for(w, size) for w in words]
     sp = draw.textlength(' ', font=font('rtl' if rtl else 'latin', size)) * 1.4
-    widths = [draw.textlength(s, font=f) for s, f in zip(shaped, fonts)]
+    # each word -> list of (shaped run, font, width), in visual left-to-right order
+    parts = []
+    for w in words:
+        runs = []
+        for r in (script_runs(w) if is_mixed(w) else [w]):
+            f = font_for(r, size); s = shape(r)
+            runs.append((s, f, draw.textlength(s, font=f)))
+        parts.append(runs)
+    widths = [sum(r[2] for r in p) for p in parts]
     total = sum(widths) + sp * (len(words) - 1)
     x = (width + total) / 2 if rtl else (width - total) / 2
-    for i, (s, f, w) in enumerate(zip(shaped, fonts, widths)):
+    for i, (p, w) in enumerate(zip(parts, widths)):
         if rtl:
             x -= w
-        # Latin fonts sit higher on the line than Arabic ones; nudge them down to share a baseline
-        dy = int(size * 0.1) if (rtl and f is not fonts[0] and LATIN_RE.search(words[i])) else 0
-        draw.text((x, y + dy), s, font=f, fill=hl if i == active else color, stroke_width=stroke, stroke_fill='black')
+        xx = x
+        for s, f, rw in p:
+            # Latin fonts sit higher on the line than Arabic ones; nudge them down to share a baseline
+            dy = int(size * 0.1) if (rtl and LATIN_RE.search(s)) else 0
+            draw.text((xx, y + dy), s, font=f, fill=hl if i == active else color, stroke_width=stroke, stroke_fill='black')
+            xx += rw
         x = x - sp if rtl else x + w + sp
 
 def centred(draw, y, text, size, width, fill='white', kind=None, stroke=0):

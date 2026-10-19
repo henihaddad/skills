@@ -20,7 +20,7 @@ body = {'model': model, 'modalities': ['text', 'audio'], 'audio': {'format': 'mp
         'messages': [{'role': 'user', 'content': a.prompt + ' Instrumental, no vocals.'}]}
 req = urllib.request.Request(API + '/chat/completions', data=json.dumps(body).encode(),
                              headers={'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json'})
-chunks = []
+chunks, cost = [], None
 with urllib.request.urlopen(req, timeout=900) as r:
     for line in r:
         line = line.decode(errors='replace').strip()
@@ -30,6 +30,7 @@ with urllib.request.urlopen(req, timeout=900) as r:
             j = json.loads(line[6:])
         except ValueError:
             continue
+        cost = (j.get('usage') or {}).get('cost', cost)
         for c in j.get('choices', []):
             d = (c.get('delta') or {}).get('audio') or {}
             if d.get('data'):
@@ -37,4 +38,5 @@ with urllib.request.urlopen(req, timeout=900) as r:
 if not chunks:
     raise SystemExit('No audio returned. Check the model name and that streaming + audio modality are set.')
 open(a.out, 'wb').write(base64.b64decode(''.join(chunks)))
-print(f'saved {a.out} ({duration(a.out):.1f}s)')
+from common import last_loud
+print(f'saved {a.out} ({duration(a.out):.1f}s, audible until {last_loud(a.out):.1f}s), cost ${cost if cost is not None else "?"}')
