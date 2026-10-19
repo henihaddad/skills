@@ -54,12 +54,17 @@ seams); changing settings clears the cache automatically. Output: `work/transcri
 What to expect: Scribe leans toward standard spelling. Derja is understood but often written more
 formally, French words may come out in Latin letters, names are spelled roughly. **Check names
 before putting them on cards.** The script lists mixed Arabic+Latin tokens (e.g. "الوسلati") - ASR
-errors that render badly. To fix a word, edit it in `transcript.json` `words` (and the matching
-`sents` text) in your work folder.
+errors that render badly. Fix words with one command (keeps words and sentences in sync,
+handles split/merged tokens, keeps a backup):
+```bash
+$PY $SK/fix_transcript.py work "الوسلati=الوسلاتي" "هالشالة بكا لوجي=هالشهادة البكالوريا"   # --at <sec> for one occurrence
+```
 
 ## 3. Pick moments
 Look at the first lines of transcript.txt: shows often open with their own teaser of the best
-lines. Set `--skip-start` to its length so picks use the original, later occurrence.
+lines (sometimes in several pieces, e.g. 0-75 s and again at 2-5 min). Set `--skip-start` to the
+first block; the report also flags any clip line that is said twice (`LINE ALSO AT ...`) so you
+can keep the later, original occurrence.
 ```bash
 $PY $SK/pick_moments.py work --mode trailer --context "<show, host, guest, topic>" --skip-start 70 --must "topic A, topic B"
 $PY $SK/pick_moments.py work --mode tldr --minutes 5 --context "..." --skip-start 70 --must "..."
@@ -76,8 +81,8 @@ tokens. Treat every flag as a decision to make, then also read the clips themsel
 - Trailer arc: hook (strongest line) -> title card -> setup -> escalating conflict -> mid card -> climax -> short sting -> end card, 75-90 s.
 - TL;DR: 10-40 s clips so arguments make sense, 5-7 chapters, cold open not repeated later.
 
-Edit the plan JSON directly: `start_idx`/`end_idx`, `end_time` (absolute seconds, to trim
-mid-sentence), card `lines`, `chapter`. Clips can also be absolute: `{"type":"clip","start":812.4,"end":840.1}`.
+Edit the plan JSON directly: `start_idx`/`end_idx`, `start_time`/`end_time` (absolute seconds, to
+trim inside the first/last sentence, e.g. drop a leading «ثم» or a trailing «سامحني»), card `lines`, `chapter`. Clips can also be absolute: `{"type":"clip","start":812.4,"end":840.1}`.
 For a long edit, show the user the storyline (one line per clip, translated) before rendering.
 
 ## 4. Music (optional)
@@ -87,7 +92,8 @@ $PY $SK/music.py "90-second dark tense documentary trailer score, pulsing bass, 
 Lyria 3 Pro, ~$0.08 (printed). The file must sit next to the plan (`"music": "music.mp3"` is
 relative to the plan's folder). Trailers: `music_mode: "bed"` (low under dialogue, loud on cards;
 the track's last *audible* moment is aligned with the end, so the end card has music). TL;DRs:
-`"cards"` (music only on title cards). `"music": null` to skip.
+`"cards"` (music only on title cards). `"music": null` to skip. Ask for a track at least as long as
+the edit; a shorter one is looped (with a warning).
 
 ## 5. Render
 ```bash

@@ -103,6 +103,20 @@ import re
 from common import ts, is_mixed
 END_P = re.compile(r'[.!?؟。…]["»”]?$')
 CONJ = re.compile(r'^(و|ف|ثم|أن|ان|إن|مع|لكن|بل|أو|او|and|but|so|or|that|then)\b', re.I)
+def _norm(t):
+    return re.sub(r'[^\w ]', '', re.sub('[\u064b-\u0652]', '', t)).split()
+_grams = {}
+for _k, _s in enumerate(S):
+    _w = _norm(_s[2])
+    for _g in zip(_w, _w[1:], _w[2:], _w[3:], _w[4:]):
+        _grams.setdefault(_g, set()).add(_k)
+def dup_of(x):
+    w = _norm(S[x][2])
+    for g in zip(w, w[1:], w[2:], w[3:], w[4:]):
+        others = [k for k in _grams.get(g, ()) if abs(k - x) > 3]
+        if others:
+            return min(others, key=lambda k: abs(S[k][0] - S[x][0]))
+    return None
 total, used = 0, {}
 for k, it in enumerate(items):
     if it['type'] != 'clip':
@@ -121,6 +135,11 @@ for k, it in enumerate(items):
             break
     for x in range(i, j + 1):
         used.setdefault(x, k)
+    for x in range(i, j + 1):                      # same line said twice: one is usually the show's teaser
+        twin = dup_of(x)
+        if twin is not None:
+            flags.append(f"LINE ALSO AT {ts(S[twin][0])} (sentence {twin}) - one copy is probably the teaser; use the later, original one")
+            break
     if a.skip_start and S[i][0] < a.skip_start:
         flags.append("INSIDE THE SHOW'S TEASER -> use the original occurrence later in the episode")
     bad = [w[2] for w in T['words'] if S[i][0] - 0.01 <= w[0] <= S[j][1] and is_mixed(w[2])]

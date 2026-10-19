@@ -53,7 +53,7 @@ CW = int(round(SH * 9 / 16 / 2) * 2)          # crop width for 9:16 at full heig
 def window(it):
     if 'start' in it:
         return it['start'], it['end'] - it['start']
-    st = S[it['start_idx']][0] - 0.12
+    st = it.get('start_time') or S[it['start_idx']][0] - 0.12
     en = S[it['end_idx']][1] + 0.3
     if it.get('end_time'):
         en = it['end_time']
@@ -150,7 +150,8 @@ def clip_key(it):
     """Cache key. Includes end_time so trimming a clip re-plans its crop instead of reusing a stale one."""
     if 'start' in it:
         return f"t{it['start']:.2f}-{it['end']:.2f}"
-    return f"{it['start_idx']}-{it['end_idx']}" + (f"@{it['end_time']}" if it.get('end_time') else '')
+    return (f"{it['start_idx']}-{it['end_idx']}" + (f"@{it['end_time']}" if it.get('end_time') else '')
+            + (f"^{it['start_time']}" if it.get('start_time') else ''))
 
 for it in P['items']:
     if it['type'] != 'clip':

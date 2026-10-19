@@ -114,7 +114,11 @@ def shape(t):
         return t
     import arabic_reshaper
     from bidi.algorithm import get_display
-    return get_display(arabic_reshaper.reshape(t))
+    global _RESHAPER
+    if _RESHAPER is None:   # keep diacritics (shadda etc.); the default reshaper deletes them
+        _RESHAPER = arabic_reshaper.ArabicReshaper(configuration={'delete_harakat': False})
+    return get_display(_RESHAPER.reshape(t))
+_RESHAPER = None
 
 def is_mixed(word):
     """ASR sometimes glues Arabic and Latin letters into one token ("الوسلati"). Report these:

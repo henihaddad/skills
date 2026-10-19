@@ -74,6 +74,12 @@ already in the scripts. If you change the scripts, don't reintroduce these.
 - **Parallel agents**: give each editor its own work folder (renders write numbered files into
   `work/seg_*`), and don't run setup.sh twice at once.
 
+- **Teasers in pieces**: one show repeated highlight lines at 0-75 s AND 2-5 min. The report flags lines said twice.
+- **Music shorter than the edit** used to stop before the end card silently. It now loops with a warning.
+- **No way to trim the start of a clip** inside a sentence (leading «ثم»): `start_time` now exists.
+- **Fixing ASR words by hand** meant editing words[] and sents[] separately. Use fix_transcript.py.
+- **Diacritics**: arabic-reshaper deletes harakat by default (لمّا showed as لما). They're kept now.
+
 ## Extracting one person (diarization)
 - Speaker labels are only consistent within one request. Send up to 60 min in one diarized request (45 min took 60 s, $0.16).
 - Diarization merged a co-host's voice into the guest's label. Text alone didn't reliably catch it.

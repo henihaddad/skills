@@ -60,14 +60,15 @@ def window(it):
     """Clip window in source seconds: sentence indices (+ optional end_time) or absolute start/end."""
     if 'start' in it:
         return it['start'], it['end'] - it['start']
-    st = S[it['start_idx']][0] - 0.12
+    st = it.get('start_time') or S[it['start_idx']][0] - 0.12
     en = it.get('end_time') or S[it['end_idx']][1] + 0.3
     return st, en - st
 
 def clip_key(it):
     if 'start' in it:
         return f"t{it['start']:.2f}-{it['end']:.2f}"
-    return f"{it['start_idx']}-{it['end_idx']}" + (f"@{it['end_time']}" if it.get('end_time') else '')
+    return (f"{it['start_idx']}-{it['end_idx']}" + (f"@{it['end_time']}" if it.get('end_time') else '')
+            + (f"^{it['start_time']}" if it.get('start_time') else ''))
 
 def card_png(lines, path):
     im = Image.new('RGB', (W, H), 'black'); d = ImageDraw.Draw(im)
@@ -196,9 +197,16 @@ def join(seglist, out, bed=False, total=None):
     if bed and music:
         # line the track's last LOUD moment up with the end of the video: generated tracks end with
         # seconds of silent fade, and aligning the file end left the end card with no music
-        off = max(0, last_loud(music) - total)
+        audible = last_loud(music)
+        loop = []
+        if audible < total:
+            print(f'WARNING: music is audible for {audible:.1f}s but the video is {total:.1f}s - looping it '
+                  '(generate a longer track for a clean ending)')
+            loop, off = ['-stream_loop', '-1'], 0
+        else:
+            off = audible - total
         loud = '+'.join(f'between(t,{s0:.2f},{s1:.2f})' for s0, s1 in spans) or '0'
-        ff('-i', tmp, '-ss', f'{off:.2f}', '-i', music, '-filter_complex',
+        ff('-i', tmp, *loop, '-ss', f'{off:.2f}', '-i', music, '-filter_complex',
            f"[1:a]aresample=44100,volume='if({loud},0.9,0.22)':eval=frame,afade=t=in:d=1[m];[0:a]volume=1.0[d];"
            f"[d][m]amix=inputs=2:normalize=0:duration=first,alimiter=limit=0.95[a]",
            '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out)
