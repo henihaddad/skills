@@ -97,6 +97,31 @@ already in the scripts. If you change the scripts, don't reintroduce these.
 - **Burned-in subtitles** in the source (the show's own captions on teaser moments) stack under ours.
   Not auto-detected yet; look for them in step 6.
 
+## Found by the reels test runs (4 episodes in parallel, Oct 2026)
+- **The picker's reels need an editor.** Every reel was reworked: questions without their answer,
+  filler endings, a hook that was the reel's own punch line, 1-s hooks, and one run with no hooks at
+  all. The prompt now asks for 2.5-6 s hooks from the middle of the reel; the report flags short hooks
+  and hooks that repeat the ending, and counts reel length without the hook.
+- **Handheld single camera** (a radio studio filmed with one zooming camera): one crop per shot cut the
+  guest off (crop at x=515, face at 860). Shots where the one person moves a lot are now tracked:
+  detect every 3rd frame, median filter, lazy camera (dead zone 45 px, max 14 px/frame, 6 frames ahead).
+- **Hundreds of crop steps** made ffmpeg fail to parse a linear chain of nested `if()`s. The crop
+  expression is now a balanced if-tree (depth ~9).
+- **Burned-in captions everywhere**: one show captioned its best moments in the episode body, not only in
+  the teaser. `keep_top` crops the caption band away.
+- **Laptop heat**: four agents encoding 1080x1920 with libx264 kept all cores at 100% for 30 min.
+  libx264 used 29 s of CPU for a 20 s clip; the Mac media engine (h264_videotoolbox) 3.7 s, same wall
+  time, SSIM 0.986. Now the default on macOS, with hardware decode of the source.
+- **Hyphens** (Scribe writes stutters/false starts as `م-م-م-`, `تعشقها-`) were empty boxes. clean_token drops them.
+- **Latin inside an Arabic line** came out reversed ("FM Cap"). Runs of Latin words are now placed as one block.
+- **fix_transcript.py** couldn't delete a token (division by zero), re-added stripped punctuation, and
+  took 2+ min on a 107-min transcript (all words x all sentences). All three fixed.
+- **render.py** crashed when the `--out` folder didn't exist (wasted a 2-min render). It creates it now.
+- **`--angle-x` repeated** silently kept only the last value; it now accumulates.
+- **240p-only sources** exist (an old TV show). download.py now prints the resolution and warns.
+- **25 fps sources**: rendered segments are 30 fps, so frame indices differ by x1.2 when checking cuts.
+- A Scribe chunk returned 504 once; requests are now retried on 5xx/timeouts.
+
 ## Extracting one person (diarization)
 - Speaker labels are only consistent within one request. Send up to 60 min in one diarized request (45 min took 60 s, $0.16).
 - Diarization merged a co-host's voice into the guest's label. Text alone didn't reliably catch it.

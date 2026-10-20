@@ -6,6 +6,8 @@
 
 --mode trailer : 10-14 punchy moments (2-10 s each), hook -> conflict -> climax -> sting, ~75-90 s.
 --mode tldr    : 5-7 chronological chapters, clips 10-40 s, a viewer understands the whole story.
+--mode reels   : 5-8 standalone vertical reels, 20-45 s each: opens on a hook line, one exchange, ends on
+                 the punch. Render with --format 9:16 --split-chapters reels/ (one file per reel).
 
 The model only proposes. Always review the printed boundary report: every clip should start and
 end on a complete thought, and a host question must not end a clip without its answer
@@ -16,7 +18,7 @@ from common import chat_json, load, save
 
 ap = argparse.ArgumentParser()
 ap.add_argument('work')
-ap.add_argument('--mode', choices=['trailer', 'tldr'], required=True)
+ap.add_argument('--mode', choices=['trailer', 'tldr', 'reels'], required=True)
 ap.add_argument('--context', default='', help='who is speaking, show name, what the episode is about')
 ap.add_argument('--minutes', type=float, default=5, help='tldr target length')
 ap.add_argument('--skip-start', type=float, default=120, help='seconds of the show\'s own teaser/intro to avoid (check transcript.txt: often 60-120 s)')
@@ -39,6 +41,19 @@ if a.mode == 'trailer':
             'tagline), one mid card before the climax (e.g. "...and the confrontation"), and an end card (show name + call to action). '
             'Return JSON: {"title":{"main":str,"tagline":str},"mid_card":str,"end_card":{"brand":str,"cta":str},'
             '"moments":[{"start_idx":int,"end_idx":int,"start_quote":str,"end_quote":str,"role":"hook|setup|conflict|climax|sting","english":str}]}')
+elif a.mode == 'reels':
+    task = (f'Pick 5-8 moments that each work as a standalone Instagram/TikTok reel for someone who has never seen the '
+            f'show. Skip the first {a.skip_start:.0f} seconds. Each reel: ONE exchange or argument, 20-45 s of speech in '
+            '1-3 clips (consecutive sentences; a second clip may jump ahead within the same exchange to cut a digression). '
+            'It must make sense alone (no "as I said earlier"), and END on the punch: a verdict, a comeback, a laugh line '
+            'or a cliffhanger, never on a filler sentence. Viewers decide in the first 1-2 seconds, so give each reel a '
+            'hook: unless the reel already opens on a sharp question, an accusation or a verdict, set hook = the most '
+            'striking line from the MIDDLE of the reel (2.5-6 s, never its last sentence: that would give the punch away). '
+            'It plays first as a flash-forward, then the reel plays from the start. Only when the opening line itself is '
+            'that strong: hook = null. Different reels must cover different topics. Title: 2-5 words, pinned on screen. '
+            'Return JSON: {"end_card":{"brand":str,"cta":str},"reels":[{"title":str,"title_en":str,'
+            '"hook":{"start_idx":int,"end_idx":int,"start_quote":str,"end_quote":str}|null,'
+            '"clips":[{"start_idx":int,"end_idx":int,"start_quote":str,"end_quote":str,"summary_en":str}],"why_en":str}]}')
 else:
     lo, hi = a.minutes * 60 * 0.9, a.minutes * 60
     task = (f'Make a {a.minutes:g}-minute TL;DR: someone who watches only this understands the key topics, the main claims and '
@@ -92,6 +107,12 @@ def anchor(c, label):
 if a.mode == 'trailer':
     for n_, m_ in enumerate(picks.get('moments', [])):
         anchor(m_, f'moment {n_ + 1}')
+elif a.mode == 'reels':
+    for r_ in picks.get('reels', []):
+        if r_.get('hook'):
+            anchor(r_['hook'], f'{r_["title"]} hook')
+        for n_, c_ in enumerate(r_['clips']):
+            anchor(c_, f'{r_["title"]} #{n_ + 1}')
 else:
     anchor(picks['cold_open'], 'cold open')
     for ch_ in picks.get('chapters', []):
@@ -121,6 +142,18 @@ if a.mode == 'trailer':
         items.insert(cut, {**card([{'text': picks['mid_card'], 'role': 'subtitle'}], 1.6), 'mid': True})
     items.append(card([{'text': e.get('brand', ''), 'role': 'brand'}, {'text': e.get('cta', ''), 'role': 'cta'}], 3.6))
     plan = {'mode': 'trailer', 'format': '16:9', 'music': 'music.mp3', 'music_mode': 'bed', 'items': items}
+elif a.mode == 'reels':
+    # one "chapter" per reel: render --split-chapters writes one file each (the chapter cards are dropped
+    # from the reels, which start straight on the hook). The hook may repeat a line of its own reel.
+    e = picks.get('end_card', {})
+    for n, r in enumerate(picks['reels'], 1):
+        items.append(card([{'text': str(n), 'role': 'number'}, {'text': r['title'], 'role': 'chapter'}], 1.5) | {'chapter_start': r['title']})
+        if r.get('hook'):
+            items.append(clip(r['hook']['start_idx'], r['hook']['end_idx'], chapter=r['title'], hook=True, note='HOOK (flash-forward)'))
+        for c in r['clips']:
+            items.append(clip(c['start_idx'], c['end_idx'], chapter=r['title'], note=c.get('summary_en', '')))
+    items.append(card([{'text': e.get('brand', ''), 'role': 'brand'}, {'text': e.get('cta', ''), 'role': 'cta'}], 2.5))
+    plan = {'mode': 'reels', 'format': '9:16', 'music': None, 'music_mode': 'cards', 'items': items}
 else:
     co = picks['cold_open']; t = picks.get('title', {}); e = picks.get('end_card', {})
     items.append(clip(co['start_idx'], co['end_idx'], note='cold open'))
@@ -167,11 +200,11 @@ for k, it in enumerate(items):
         flags.append('ENDS MID-SENTENCE? -> try end_idx+1')
     if S[j][2].rstrip().endswith(('?', '؟')):
         flags.append('ENDS ON A QUESTION -> include the answer (end_idx+1..)')
-    for x in range(i, j + 1):
+    for x in range(i, j + 1) if not it.get('hook') else ():
         if x in used:
             flags.append(f'DUPLICATE: sentence {x} is also in item {used[x]}')
             break
-    for x in range(i, j + 1):
+    for x in range(i, j + 1) if not it.get('hook') else ():
         used.setdefault(x, k)
     for x in range(i, j + 1):                      # same line said twice: one is usually the show's teaser
         twin = dup_of(x)
@@ -195,6 +228,28 @@ if must:
 short = [it for it in items if it['type'] == 'clip' and S[it['end_idx']][1] - S[it['start_idx']][0] < (8 if a.mode == 'tldr' else 2)]
 if short:
     print(f'\n!! {len(short)} clip(s) are very short for a {a.mode} (e.g. [{short[0]["start_idx"]}-{short[0]["end_idx"]}]) - extend or replace them')
+if a.mode == 'reels':
+    reel, rows = None, []
+    for it in items:
+        if it.get('chapter_start'):
+            reel = [it['chapter_start'], 0.0, None, []]; rows.append(reel)
+        elif it['type'] == 'clip' and reel:
+            if it.get('hook'):
+                reel[2] = it
+            else:
+                reel[1] += S[it['end_idx']][1] - S[it['start_idx']][0]; reel[3].append(it)
+    print('\nreels (speech seconds):')
+    for title, d, hook, body in rows:
+        msg = f'   {d:5.1f}s  {title}' + ('   !! outside 20-45 s' if not 20 <= d <= 45 else '')
+        if hook:
+            hd = S[hook['end_idx']][1] - S[hook['start_idx']][0]
+            if hd < 2.5:
+                msg += f'   !! hook only {hd:.1f}s'
+            if body and hook['end_idx'] >= body[-1]['end_idx'] >= hook['start_idx']:
+                msg += '   !! hook repeats the ending'
+        else:
+            msg += '   (no hook: check the first 2 s)'
+        print(msg)
 if a.mode == 'tldr' and total < a.minutes * 60 * 0.8:
     print(f'\n!! only {total:.0f}s of speech for a {a.minutes:g}-minute target - add or extend clips')
 print(f'\nspeech total {total:.0f}s -> {out}')

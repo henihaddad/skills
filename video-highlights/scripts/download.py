@@ -9,7 +9,8 @@ Expect ~2-4 min and ~1.2-2 GB for a 70-100 min episode at 1080p. yt-dlp may warn
 JavaScript runtime could be found"; downloads still work (installing deno silences it).
 """
 import argparse, os, subprocess, sys
-from common import ffmpeg_path
+import re
+from common import ffmpeg_path, ff_stderr
 
 ap = argparse.ArgumentParser()
 ap.add_argument('url')
@@ -29,4 +30,15 @@ cmd = [yt, '--ffmpeg-location', ffmpeg_path(), '-f', fmt, '--merge-output-format
 r = subprocess.run(cmd)
 if r.returncode or not os.path.exists(a.out):
     sys.exit('yt-dlp failed. If YouTube says "page needs to be reloaded", re-run setup.sh to refresh yt-dlp.')
-print('saved', a.out)
+info = ff_stderr('-i', a.out)
+m = re.search(r'Video:.*?(\d{3,5})x(\d{3,5}).*?([\d.]+) fps', info)
+if m:
+    w, h, fps = int(m[1]), int(m[2]), float(m[3])
+    print(f'saved {a.out}: {w}x{h}, {fps:g} fps')
+    if h < 720:
+        print(f'WARNING: the best available version is only {h}p. A 9:16 crop will be a {h * 9 // 16}px-wide strip '
+              'blown up to 1080: fine to test the edit, too soft to publish. Ask for a better copy of the master.')
+    if abs(fps - 30) > 1:
+        print(f'NOTE: {fps:g} fps source; rendered segments are 30 fps, so frame n of the source = frame n*30/{fps:g} of a segment.')
+else:
+    print('saved', a.out)

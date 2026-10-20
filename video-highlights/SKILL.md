@@ -41,7 +41,8 @@ Don't run two setup.sh at once (parallel pip installs collide); if another agent
 $PY $SK/download.py "<url>" --out source.mp4 --height 1080
 ```
 1080p if any 9:16 reel is planned (a vertical crop keeps ~32% of the width); 720p is enough for
-16:9 only. ~2-4 min and 1.2-2 GB for 70-100 min. It prefers H.264 so the source previews in
+16:9 only. The script prints the resolution and fps it got: some videos only exist at 240-480p
+(it warns) - say so up front, those reels are for testing the edit, not for publishing. ~2-4 min and 1.2-2 GB for 70-100 min. It prefers H.264 so the source previews in
 QuickTime. Ignore the yt-dlp "No supported JavaScript runtime" warning.
 
 ## 2. Transcribe
@@ -58,6 +59,7 @@ errors that render badly. Fix words with one command (keeps words and sentences 
 handles split/merged tokens, keeps a backup):
 ```bash
 $PY $SK/fix_transcript.py work "الوسلati=الوسلاتي" "هالشالة بكا لوجي=هالشهادة البكالوريا"   # --at <sec> for one occurrence
+$PY $SK/fix_transcript.py work "آآآ="                                  # empty right side deletes (fillers)
 ```
 
 ## 3. Pick moments
@@ -68,6 +70,7 @@ can keep the later, original occurrence.
 ```bash
 $PY $SK/pick_moments.py work --mode trailer --context "<show, host, guest, topic>" --skip-start 70 --must "topic A, topic B"
 $PY $SK/pick_moments.py work --mode tldr --minutes 5 --context "..." --skip-start 70 --must "..."
+$PY $SK/pick_moments.py work --mode reels --context "..." --skip-start 70     # standalone vertical reels
 ```
 (The work folder is a positional argument here.) Gemini 3.5 Flash reads the whole transcript
 (~$0.13-0.19) and writes `work/plan_<mode>.json` plus a **boundary report** with `!!` flags:
@@ -80,6 +83,13 @@ tokens. Treat every flag as a decision to make, then also read the clips themsel
 - The interviewer's pushback ("now you're accusing", "show your proof") is what makes moments feel like a confrontation. Keep it.
 - Trailer arc: hook (strongest line) -> title card -> setup -> escalating conflict -> mid card -> climax -> short sting -> end card, 75-90 s.
 - TL;DR: 10-40 s clips so arguments make sense, 5-7 chapters, cold open not repeated later.
+- Reels (`--mode reels`, preferred over splitting a TL;DR): 5-8 reels of 20-45 s, each one exchange that
+  makes sense to a stranger, ending on the punch. A `hook` clip (a striking line from the middle of the
+  reel, 2.5-6 s) plays first as a flash-forward when the reel doesn't already open on a question,
+  accusation or verdict. In four test episodes the picker's draft always needed an editor: every reel
+  was reworked to join a question to its answer, end on the punch instead of a filler or rhetorical
+  question, and fix hooks that were 1 s long or gave the ending away (the report flags these).
+  Check each reel's first 2 seconds and last sentence: those decide watch time.
 
 Edit the plan JSON directly: `start_idx`/`end_idx`, `start_time`/`end_time` (absolute seconds, to
 trim inside the first/last sentence, e.g. drop a leading «ثم» or a trailing «سامحني»), card `lines`, `chapter`. Clips can also be absolute: `{"type":"clip","start":812.4,"end":840.1}`.
@@ -110,22 +120,41 @@ different places (typically a wide two-shot where the detector missed a face in 
 frame edge), it prints `ANGLE n: ... cropped at k different places` and saves `work/angle_n.jpg`
 with the candidate crops drawn. **Look at it** and re-run with `--angle-x n=<x>` (face-centre x
 of the person to follow; usually the guest). Choosing to follow whoever is speaking in a wide shot
-is a valid editorial choice, but verify will then list those frames, which is expected. `--verify`
+is a valid editorial choice, but verify will then list those frames, which is expected.
+`--angle-x` can be repeated (`--angle-x 2=420 --angle-x 3=447`).
+
+**Moving faces**: when the one person in a shot moves across the frame (handheld or zooming camera,
+a guest leaning in and out), facetrack prints `TRACKING ...` and that shot gets a crop that follows
+the face like a lazy camera operator (no jitter; fixed studio cameras stay fixed). It reports how
+many sampled frames still have the face near the crop edge; look at those. `--track on|off` forces it.
+
+**Burned-in subtitles** in the source: add `"keep_top": 0.83` to the plan (or to one clip). The 9:16
+crop then zooms to the top 83% of the frame, cutting off the caption band (a bit softer: ~2x upscale
+from 1080p). `--verify`
 must print **0 mismatches** otherwise; it checks every frame through the exact crop expression the
 renderer uses (camera count is automatic). Instagram reels
-max out at 3 min, so long TL;DRs ship as the full vertical file plus one reel per chapter.
+max out at 3 min, so long TL;DRs ship as the full vertical file plus one reel per chapter. For a
+reels plan, the same render command with `--split-chapters reels/` writes one file per reel.
+
+**Laptop heat**: on a Mac the encode and the source decode run on the media engine
+(`h264_videotoolbox`, ~8x less CPU than libx264 at the same speed and visually equal quality), so
+a render of 8 reels takes ~1 min without maxing the CPU. Face detection is the remaining CPU work
+(~1-2 min per episode). Run at most 2 episodes at the same time; four in parallel kept every core
+busy for half an hour. `VIDEO_ENCODER=libx264` forces the software encoder.
 
 ## 6. Look before you hand it over
 Logs aren't proof. Extract frames and look at them:
 ```bash
 for t in 2 10 30 60; do $FF -v error -y -ss $t -i trailer.mp4 -frames:v 1 -vf scale=480:-2 f$t.jpg; done
+# a strip of one segment, every 45th frame:
+$FF -v error -y -i work/seg_9x16/018.mp4 -vf "select='not(mod(n\,45))',scale=216:384,tile=8x1" -frames:v 1 -fps_mode passthrough strip.jpg
 ```
 Check: subtitles render (no empty boxes, RTL text joined and in order); the yellow word matches the
 speech (compare with `transcript.json` word times, measuring durations from the real per-clip files
 in `work/seg_*/NNN.mp4`, which are a few hundredths longer than planned); cards readable; music
 present on cards/end card (`$FF -i out.mp4 -af volumedetect -f null -`). For 9:16, pull frames **by index
 right after cuts from the per-clip files** in `work/seg_9x16/` (times on the joined file drift by a
-few frames). Watch for **subtitles burned into the source** (shows often caption the moments they reuse in
+few frames). Segments are 30 fps: for a 25 fps source, source frame n is segment frame n*1.2. Watch for **subtitles burned into the source** (shows often caption the moments they reuse in
 their teaser): ours would stack on top of them. Pick another clip or another occurrence. You can't
 hear audio, so tell the user to listen for clipped words and music level.
 

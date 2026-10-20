@@ -18,6 +18,10 @@ How it works and why (each of these fixed a visible glitch):
   Smoothing over time instead makes the crop lag behind cuts by up to ~0.8 s.
 * Detections in the lower part of the frame are ignored (microphones, logos).
 * A shot with no detection borrows the position of the most similar-looking shot.
+* In-shot tracking (--track auto, the default): when the one person in a shot moves across the frame
+  (handheld or zooming camera, a guest who leans a lot), a fixed crop cuts them off. Those shots get
+  a tracked path instead: a face every 3rd frame, median-filtered, followed like a lazy camera
+  operator (dead zone, speed limit, look-ahead) so it doesn't jitter. Fixed studio cameras stay fixed.
 
 --verify classifies every frame by camera angle (k-means on tiny thumbnails, k=--cameras)
 and checks the crop side the real crop expression produces for each frame. It should report 0
@@ -26,7 +30,7 @@ moving or wide camera, inspect a contact sheet of cut frames instead.
 """
 import argparse, json, os, statistics, subprocess
 import numpy as np, cv2
-from common import load, save, ffmpeg_path
+from common import load, save, ffmpeg_path, crop_steps, crop_expr as _crop_expr
 
 ap = argparse.ArgumentParser()
 ap.add_argument('plan')
@@ -37,8 +41,10 @@ ap.add_argument('--cameras', type=int, default=0, help='camera angles for --veri
 ap.add_argument('--cut-threshold', type=float, default=20)
 ap.add_argument('--prefer', choices=['closeup', 'left', 'right', 'largest', 'most'], default='closeup',
                 help='which face to follow in wide shots with two people when nothing else decides it')
-ap.add_argument('--angle-x', default='', help='force a crop per camera angle, e.g. "2=200,0=1100" (face-centre x in '
-                'source pixels); angle numbers and previews are printed/saved by the angle pass')
+ap.add_argument('--track', choices=['auto', 'on', 'off'], default='auto',
+                help='follow a moving face inside a shot: auto = only shots where the person moves a lot')
+ap.add_argument('--angle-x', action='append', default=[], help='force a crop per camera angle, e.g. "2=200,0=1100" (face-centre x in '
+                'source pixels; may be repeated); angle numbers and previews are printed/saved by the angle pass')
 a = ap.parse_args()
 FF = ffmpeg_path()
 S = load(os.path.join(a.work, 'transcript.json'))['sents']
@@ -47,17 +53,17 @@ P = load(a.plan)
 def src_dims():
     r = subprocess.run([FF, '-hide_banner', '-i', a.source], capture_output=True, text=True).stderr
     import re
-    m = re.search(r'Video:.*?(\d{3,5})x(\d{3,5})', r)
-    return int(m[1]), int(m[2])
-SW, SH = src_dims()
+    m = re.search(r'Video:.*?(\d{3,5})x(\d{3,5})', r); f = re.search(r'([\d.]+) fps', r)
+    return int(m[1]), int(m[2]), float(f[1]) if f else 30.0
+SW, SH, FPS = src_dims()
 CW = int(round(SH * 9 / 16 / 2) * 2)          # crop width for 9:16 at full height
 
 def window(it):
     if 'start' in it:
         return it['start'], it['end'] - it['start']
     i, j = it['start_idx'], it['end_idx']
-    st = it.get('start_time') or max(S[i][0] - 0.12, (S[i - 1][1] + 0.02) if i > 0 else 0)
-    en = it.get('end_time') or min(S[j][1] + 0.3, (S[j + 1][0] - 0.03) if j + 1 < len(S) else 1e9)
+    st = it['start_time'] if it.get('start_time') is not None else max(S[i][0] - 0.12, (S[i - 1][1] + 0.02) if i > 0 else 0)
+    en = it['end_time'] if it.get('end_time') is not None else min(S[j][1] + 0.3, (S[j + 1][0] - 0.03) if j + 1 < len(S) else 1e9)
     return st, en - st
 
 def decode(st, du, vf, w, h, pix='gray', ch=1):
@@ -89,6 +95,32 @@ def split_people(dets):
             groups[-1].append(d)
     return [(statistics.median(x for x, _ in g), len(g), sum(w for _, w in g) / len(g)) for g in groups]
 
+def track_shot(fr, s0, s1, x0):
+    """Tracked crop path for one shot: [[frame, centre_x], ...] at every frame where the crop moves."""
+    det = {}
+    for i in range(s0, s1, 3):
+        fd = faces(fr[i])
+        if fd:
+            big = max(w for _, w in fd); xs = [x for x, w in fd if w >= big * 0.6]
+            prev = det[max(det)] if det else x0
+            det[i] = min(xs, key=lambda x: abs(x - prev))       # stay on the same person
+    if len(det) < 4:
+        return None, 0, 0
+    n, sc = s1 - s0, SW / 1280
+    ks = sorted(det); raw = np.interp(np.arange(s0, s1), ks, [det[i] for i in ks])
+    med = np.array([np.median(raw[max(0, i - 7):i + 8]) for i in range(n)])   # kills single misdetections
+    c, path, last = float(np.median(med[:15])), [], None
+    xs = []
+    for i in range(n):       # lazy camera: hold inside a dead zone, then glide with a speed limit, 6 frames ahead
+        d = med[min(n - 1, i + 6)] - c
+        if abs(d) > 45 * sc:
+            c += min(14 * sc, (abs(d) - 45 * sc) * 0.35) * np.sign(d)
+        x = crop_x(c); xs.append(x)
+        if x != last:
+            path.append([s0 + i, round(c, 1)]); last = x
+    bad = sum(1 for i in ks if not (xs[i - s0] + 40 * sc <= det[i] <= xs[i - s0] + CW - 40 * sc))
+    return path, bad, len(ks)
+
 def plan_clip(st, du, key):
     fr = decode(st, du, 'scale=960:540', 960, 540, 'bgr24', 3)
     g = fr[:, ::10, ::10].mean(axis=3)
@@ -108,6 +140,13 @@ def plan_clip(st, du, key):
         cl = [c for c in split_people(dets) if c[1] >= 2] or split_people(dets)
         if len(cl) == 1:
             shots.append([int(s0), cl[0][0]])
+            spread = max(x for x, _ in dets) - min(x for x, _ in dets)
+            if a.track == 'on' or (a.track == 'auto' and spread > CW * 0.3 and s1 - s0 > 20):
+                path, bad, nd = track_shot(fr, s0, s1, cl[0][0])
+                if path and len(path) > 1:
+                    shots[-1] += [None, path]
+                    print(f'  TRACKING {key} frames {s0}-{s1}: face moves over {spread:.0f}px -> {len(path)} crop steps; '
+                          f'face near/outside the crop edge on {bad}/{nd} sampled frames')
         else:
             shots.append([int(s0), cl]); wide.append(len(shots) - 1)
     # wide shots: choose one person
@@ -139,10 +178,7 @@ def crop_x(cx):
     return int(min(SW - CW, max(0, cx - CW / 2)))
 
 def crop_expr(shots):
-    ex = str(crop_x(shots[-1][1]))
-    for i in range(len(shots) - 2, -1, -1):
-        ex = f'if(lt(n,{shots[i + 1][0]}),{crop_x(shots[i][1])},{ex})'
-    return ex
+    return _crop_expr(shots, SW, CW)
 
 def kmeans_auto(Xs, fixed=0):
     """k-means++ with restarts; k = `fixed`, or the smallest k in 2..5 after which more clusters stop helping."""
@@ -198,11 +234,11 @@ if len(rows) >= 2:
     C = kmeans_auto([TH[k][i] for k, i in rows])
     for (k, i) in rows:
         ang = int(((np.array(TH[k][i]) - C) ** 2).sum(1).argmin())
-        F[k][i] = F[k][i][:2] + [ang]
-    force = {int(x.split('=')[0]): float(x.split('=')[1]) for x in a.angle_x.split(',') if '=' in x}
+        F[k][i] = F[k][i][:2] + [ang] + F[k][i][3:]
+    force = {int(x.split('=')[0]): float(x.split('=')[1]) for x in ','.join(a.angle_x).split(',') if '=' in x}
     for k, i in rows:
         if F[k][i][2] in force:
-            F[k][i][1] = force[F[k][i][2]]
+            F[k][i][1] = force[F[k][i][2]]; F[k][i] = F[k][i][:3]
     for ang in sorted({F[k][i][2] for k, i in rows}):
         xs = [crop_x(F[k][i][1]) for k, i in rows if F[k][i][2] == ang]
         groups = []
@@ -216,7 +252,7 @@ if len(rows) >= 2:
             k0, i0 = next((k, i) for k, i in rows if F[k][i][2] == ang)
             it0 = next(it for it in P['items'] if it['type'] == 'clip' and clip_key(it) == k0)
             st0, _ = window(it0)
-            img = decode(st0 + (F[k0][i0][0] + 3) / 29.97, 0.1, f'scale={SW // 4}:{SH // 4}', SW // 4, SH // 4, 'bgr24', 3)[0].copy()
+            img = decode(st0 + (F[k0][i0][0] + 3) / FPS, 0.1, f'scale={SW // 4}:{SH // 4}', SW // 4, SH // 4, 'bgr24', 3)[0].copy()
             cols = [(0, 255, 255), (255, 0, 255), (0, 255, 0), (255, 128, 0)]
             for gi, g_ in enumerate(groups):
                 x0 = int(statistics.median(g_)) // 4; col = cols[gi % len(cols)]
@@ -241,7 +277,7 @@ if a.verify:
         cr = decode(st, du, f"crop={CW}:{SH}:x='{crop_expr(F[k])}':y=0,scale={cw}:{ch}", cw, ch).astype(float)
         # candidate crop centres = distinct positions used anywhere, compare the real crop to each
         cands = []
-        for x in sorted(crop_x(sh[1]) for sh in F[k]):
+        for x in sorted(crop_x(c) for _, c in crop_steps(F[k])):
             if not cands or x - cands[-1] > CW * 0.3:
                 cands.append(x)
         if len(cands) == 1:                       # single-shot clip: compare against the far side too
@@ -259,7 +295,10 @@ if a.verify:
     o = 0
     for k, s in zip(keys, sides):
         b = np.where(bad[o:o + len(s)])[0]
-        if len(b):
+        if len(b) and any(len(sh) > 3 and sh[3] for sh in F[k]):
+            print(f'  {k}: {len(b)} frames off the camera\'s usual crop - expected, this clip is tracked (the crop follows the face)')
+            bad[o:o + len(s)] = False
+        elif len(b):
             print(f'  {k}: {len(b)} frames cropped differently from other shots of the same camera '
                   f'(frames {b[0]}-{b[-1]}). Fine if you chose this on purpose (e.g. following the speaker in a wide shot).')
         o += len(s)

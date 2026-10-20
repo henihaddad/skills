@@ -8,7 +8,8 @@ plan.json (written by pick_moments.py, edit freely):
   {"format": "16:9" | "9:16", "music": "music.mp3" | null, "music_mode": "bed" | "cards",
    "items": [
      {"type": "clip", "start_idx": 346, "end_idx": 346, "chapter": "optional chapter title",
-      "end_time": optional absolute seconds to cut earlier/later than the sentence end},
+      "end_time": optional absolute seconds to cut earlier/later than the sentence end,
+      "keep_top": optional 0-1, 9:16 only: keep the top part of the frame (also plan-level) to crop out burned-in subtitles},
      {"type": "card", "dur": 2.6, "lines": [{"text": "...", "role": "title|subtitle|small|number|chapter|brand|cta"}]}
    ]}
 
@@ -23,9 +24,9 @@ What you get:
 * --split-chapters DIR: one reel per chapter (starts straight on speech, ends on the end card),
   so a 5-minute TL;DR becomes reels under Instagram's 3-minute limit.
 """
-import argparse, os, re
+import argparse, os, re, sys
 from PIL import Image, ImageDraw
-from common import ff, load, clean_token, draw_words, centred, font, shape, is_rtl, duration, last_loud
+from common import ff, load, clean_token, draw_words, centred, font, shape, is_rtl, duration, last_loud, venc, crop_expr
 
 ap = argparse.ArgumentParser()
 ap.add_argument('plan')
@@ -36,6 +37,7 @@ ap.add_argument('--format', choices=['16:9', '9:16'], default=None)
 ap.add_argument('--split-chapters', default=None, metavar='DIR')
 ap.add_argument('--brand', default=None, help='small line under the chapter tag in 9:16, e.g. "Guest on Show"')
 a = ap.parse_args()
+os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
 
 P = load(a.plan); FMT = a.format or P.get('format', '16:9'); V = FMT == '9:16'
 T = load(os.path.join(a.work, 'transcript.json')); S, WD = T['sents'], T['words']
@@ -62,8 +64,8 @@ def window(it):
         return it['start'], it['end'] - it['start']
     i, j = it['start_idx'], it['end_idx']
     # pad the edges, but never into the neighbouring sentence (its first word leaked in otherwise)
-    st = it.get('start_time') or max(S[i][0] - 0.12, (S[i - 1][1] + 0.02) if i > 0 else 0)
-    en = it.get('end_time') or min(S[j][1] + 0.3, (S[j + 1][0] - 0.03) if j + 1 < len(S) else 1e9)
+    st = it['start_time'] if it.get('start_time') is not None else max(S[i][0] - 0.12, (S[i - 1][1] + 0.02) if i > 0 else 0)
+    en = it['end_time'] if it.get('end_time') is not None else min(S[j][1] + 0.3, (S[j + 1][0] - 0.03) if j + 1 < len(S) else 1e9)
     return st, en - st
 
 def clip_key(it):
@@ -147,13 +149,17 @@ def crop_filter(it, k):
         shots = FACES.get(clip_key(it))
         if not shots:
             raise SystemExit(f"faces.json has no entry for clip {clip_key(it)}; re-run facetrack.py")
-        X = lambda c: int(min(SW - CW, max(0, c - CW / 2)))
-        ex = str(X(shots[-1][1]))
-        for i in range(len(shots) - 2, -1, -1):
-            ex = f'if(lt(n,{shots[i + 1][0]}),{X(shots[i][1])},{ex})'
+        ex = crop_expr(shots, SW, CW)
         # crop must come first in the chain so n counts source frames exactly like facetrack.py
-        return f"crop={CW}:{SH}:x='{ex}':y=0,scale={W}:{H}:flags=lanczos,"
+        # keep_top < 1 (plan or clip): zoom in, keeping the top part of the frame centred on the face,
+        # to cut away subtitles burned into the bottom of the source
+        kt = float(it.get('keep_top', P.get('keep_top', 1)))
+        zoom = f"crop={int(CW * kt) // 2 * 2}:{int(SH * kt) // 2 * 2}:{int(CW * (1 - kt) / 2)}:0," if kt < 1 else ''
+        return f"crop={CW}:{SH}:x='{ex}':y=0,{zoom}scale={W}:{H}:flags=lanczos,"
     return f'scale={int(W * 1.1)}:{int(H * 1.1)},crop={W}:{H},' if k % 2 == 0 else f'scale={W}:{H},'
+
+# decode the source on the media engine too (macOS); frames and their count are the same as software decode
+HWDEC = ['-hwaccel', 'videotoolbox'] if sys.platform == 'darwin' and os.environ.get('VIDEO_HWDEC', '1') != '0' else []
 
 music = P.get('music') and os.path.join(os.path.dirname(os.path.abspath(a.plan)), P['music'])
 if music and not os.path.exists(music):
@@ -171,22 +177,22 @@ for k, it in enumerate(P['items']):
         if music and mode == 'cards':
             ff('-loop', 1, '-t', du, '-i', f'{SEG}/{k:03d}.png', '-ss', f'{mpos:.1f}', '-t', du, '-i', music, '-filter_complex',
                f'[0:v]{vf}[v];[1:a]aresample=44100,volume=0.75,afade=t=in:d=0.25,afade=t=out:st={du - 0.5:.2f}:d=0.5,aformat=channel_layouts=stereo[a]',
-               '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-crf', 18, '-c:a', 'aac', '-ar', 44100, '-t', du, o)
+               '-map', '[v]', '-map', '[a]', *venc('high'), '-c:a', 'aac', '-ar', 44100, '-t', du, o)
             mpos = mlen * 0.45 + ((mpos - mlen * 0.45 + du + 6) % max(1, mlen * 0.45))
         else:
             ff('-loop', 1, '-t', du, '-i', f'{SEG}/{k:03d}.png', '-f', 'lavfi', '-t', du, '-i', 'anullsrc=r=44100:cl=stereo',
-               '-vf', vf, '-c:v', 'libx264', '-crf', 18, '-c:a', 'aac', '-shortest', o)
+               '-vf', vf, *venc('high'), '-c:a', 'aac', '-shortest', o)
         spans.append((t, t + du)); t += duration(o)
     else:
         st, du = window(it); lst = karaoke(st, du, k)
         tg = f'{SEG}/tag{k:03d}.png'; tag_png(it.get('chapter'), tg)
-        ff('-ss', f'{st:.2f}', '-t', f'{du:.2f}', '-i', a.source, '-f', 'concat', '-safe', 0, '-i', lst,
+        ff(*HWDEC, '-ss', f'{st:.2f}', '-t', f'{du:.2f}', '-i', a.source, '-f', 'concat', '-safe', 0, '-i', lst,
            '-loop', 1, '-t', f'{du:.2f}', '-i', tg, '-filter_complex',
            f"[0:v]{crop_filter(it, k)}eq=contrast=1.1:saturation=0.88,vignette=PI/5,fps={FPS},"
            f"fade=in:st=0:d=0.12,fade=out:st={du - 0.18:.2f}:d=0.18[v];"
            f"[1:v]format=rgba,setpts=PTS-STARTPTS[s];[v][s]overlay=0:0:eof_action=repeat[v2];[v2][2:v]overlay=0:0,format=yuv420p[vo];"
            f"[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.15,afade=t=in:d=0.08,afade=t=out:st={du - 0.18:.2f}:d=0.18[ao]",
-           '-map', '[vo]', '-map', '[ao]', '-c:v', 'libx264', '-crf', 20 if V else 19, '-c:a', 'aac', '-ar', 44100, o)
+           '-map', '[vo]', '-map', '[ao]', *venc('normal' if V else 'high'), '-c:a', 'aac', '-ar', 44100, o)
         t += duration(o)      # real segment length; planned lengths drift ~0.4 s over 4 min
     segs.append(o); print(f'{k:3d} {it["type"]:5s} -> {t:6.1f}s', flush=True)
 

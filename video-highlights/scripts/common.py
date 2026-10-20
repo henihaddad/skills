@@ -39,6 +39,22 @@ def ff_stderr(*args):
     FF = FF or ffmpeg_path()
     return subprocess.run([FF, '-hide_banner', *map(str, args)], capture_output=True, text=True).stderr
 
+_VENC = None
+def venc(quality='high'):
+    """Video encoder args. On Macs, the media engine (h264_videotoolbox) does the encode: ~8x less CPU
+    than libx264 at the same speed and visually equal quality (SSIM 0.986 on a 9:16 test), so the laptop
+    stays cool. Every segment must use the same encoder so they can be joined with -c copy.
+    VIDEO_ENCODER=libx264 forces the software encoder."""
+    global _VENC, FF
+    if _VENC is None:
+        FF = FF or ffmpeg_path()
+        want = os.environ.get('VIDEO_ENCODER')
+        hw = 'h264_videotoolbox' in subprocess.run([FF, '-hide_banner', '-encoders'], capture_output=True, text=True).stdout
+        _VENC = want or ('h264_videotoolbox' if hw and sys.platform == 'darwin' else 'libx264')
+    if _VENC == 'h264_videotoolbox':
+        return ['-c:v', 'h264_videotoolbox', '-q:v', 68 if quality == 'high' else 62, '-profile:v', 'high', '-pix_fmt', 'yuv420p']
+    return ['-c:v', 'libx264', '-crf', 18 if quality == 'high' else 20, '-pix_fmt', 'yuv420p']
+
 def duration(path):
     m = re.search(r'Duration: (\d+):(\d+):([\d.]+)', ff_stderr('-i', path))
     return int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]) if m else 0.0
@@ -56,6 +72,26 @@ def last_loud(path, noise_db=-35):
     tail = [float(s) for s in starts if float(s) > d * 0.6]
     return min(tail) if tail else d
 
+def crop_steps(shots):
+    """faces.json shots -> [(first_frame, centre_x)]. A shot may carry a tracked path as its 4th element
+    (in-shot tracking for handheld/zooming cameras); it replaces the shot's single position."""
+    out = []
+    for s in shots:
+        out += [(f, x) for f, x in s[3]] if len(s) > 3 and s[3] else [(s[0], s[1])]
+    return out
+
+def crop_expr(shots, sw, cw):
+    """ffmpeg expression for crop x as a function of the frame counter n. A balanced if-tree: a linear
+    chain of hundreds of nested ifs (tracked shots) makes ffmpeg fail to parse the filter."""
+    st = crop_steps(shots)
+    X = lambda c: int(min(sw - cw, max(0, c - cw / 2)))
+    def tree(lo, hi):
+        if hi - lo == 1:
+            return str(X(st[lo][1]))
+        mid = (lo + hi) // 2
+        return f'if(lt(n,{st[mid][0]}),{tree(lo, mid)},{tree(mid, hi)})'
+    return tree(0, len(st))
+
 # ---------------------------------------------------------------- OpenRouter
 API = 'https://openrouter.ai/api/v1'
 
@@ -65,18 +101,28 @@ def key():
         sys.exit('Set OPENROUTER_API_KEY (never hard-code it in scripts or commit it).')
     return k
 
-def post(path, body, timeout=600, raw=False):
-    req = urllib.request.Request(API + path, data=json.dumps(body).encode(),
-                                 headers={'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = r.read()
-    except urllib.error.HTTPError as e:
-        msg = e.read().decode(errors='replace')
-        if e.code == 403 and 'limit' in msg.lower():
-            sys.exit('OpenRouter key spending limit reached. Raise it in OpenRouter settings and retry.\n' + msg[:400])
-        raise RuntimeError(f'OpenRouter {e.code}: {msg[:800]}')
-    return data if raw else json.loads(data)
+def post(path, body, timeout=600, raw=False, tries=3):
+    """POST to OpenRouter. Gateway errors (502/503/504) and timeouts are retried: a Scribe chunk got a
+    504 once and a plain rerun worked."""
+    import time
+    for attempt in range(tries):
+        req = urllib.request.Request(API + path, data=json.dumps(body).encode(),
+                                     headers={'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read()
+            return data if raw else json.loads(data)
+        except urllib.error.HTTPError as e:
+            msg = e.read().decode(errors='replace')
+            if e.code == 403 and 'limit' in msg.lower():
+                sys.exit('OpenRouter key spending limit reached. Raise it in OpenRouter settings and retry.\n' + msg[:400])
+            if e.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                print(f'  OpenRouter {e.code}, retrying in {10 * (attempt + 1)} s', flush=True); time.sleep(10 * (attempt + 1)); continue
+            raise RuntimeError(f'OpenRouter {e.code}: {msg[:800]}')
+        except (TimeoutError, urllib.error.URLError) as e:
+            if attempt < tries - 1:
+                print(f'  OpenRouter request failed ({e}), retrying', flush=True); time.sleep(10 * (attempt + 1)); continue
+            raise
 
 def chat_json(model, prompt, temperature=0.3):
     """One chat call that must return a JSON object. Returns (obj, cost)."""
@@ -103,6 +149,11 @@ def clean_token(t):
     Latin/full-width punctuation to Arabic punctuation for RTL words: Arabic system fonts such as
     Geeza Pro have no glyph for ! ? , : and render them as empty boxes."""
     t = re.sub('[\u0400-\u04ff\u3040-\u30ff\u4e00-\u9fff]', '', t)
+    if is_rtl(t):
+        # Scribe writes false starts and stutters with hyphens ("تعشقها-", "م-م-م-"); Arabic fonts have no
+        # hyphen glyph (empty box). Drop them; a pure stutter collapses to one copy.
+        parts = [x for x in re.split('[-\u2010-\u2015]+', t) if x]
+        t = (parts[0] if len(set(parts)) == 1 else ''.join(parts)) if parts else ''
     if is_rtl(t) and not LATIN_RE.search(t):
         for a, b in (('！', ''), ('!', ''), ('？', '؟'), ('?', '؟'), ('，', '،'), (',', '،'), ('：', ''), (':', ''), ('；', '؛'), (';', '؛')):
             t = t.replace(a, b)
@@ -165,6 +216,7 @@ def draw_words(draw, words, y, width, size, active=-1, color='white', hl=(255, 2
     """Draw a single line of words centred at y, highlighting words[active]. Handles RTL order and
     tokens that mix scripts (each run is drawn with a font that has its glyphs)."""
     rtl = any(is_rtl(w) for w in words)
+    words = [clean_token(w) or w if is_rtl(w) else w for w in words]
     sp = draw.textlength(' ', font=font('rtl' if rtl else 'latin', size)) * 1.4
     # each word -> list of (shaped run, font, width), in visual left-to-right order
     parts = []
@@ -177,7 +229,16 @@ def draw_words(draw, words, y, width, size, active=-1, color='white', hl=(255, 2
     widths = [sum(r[2] for r in p) for p in parts]
     total = sum(widths) + sp * (len(words) - 1)
     x = (width + total) / 2 if rtl else (width - total) / 2
-    for i, (p, w) in enumerate(zip(parts, widths)):
+    order = list(range(len(words)))
+    if rtl:   # consecutive Latin/number words ("Cap FM") are placed right-to-left as a block, keeping their own order
+        order, run = [], []
+        for i, w in enumerate(words):
+            if not is_rtl(w) and re.search(r'[A-Za-z0-9\u00c0-\u024f]', w):
+                run.append(i); continue
+            order += run[::-1] + [i]; run = []
+        order += run[::-1]
+    for i in order:
+        p, w = parts[i], widths[i]
         if rtl:
             x -= w
         xx = x
