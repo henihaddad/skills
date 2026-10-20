@@ -32,7 +32,7 @@ repo; if the user pastes one, use it inline (`export` in the command) and sugges
 
 ## 0. Setup (once per machine)
 ```bash
-$PY -c "import cv2, arabic_reshaper, PIL" 2>/dev/null && echo ready || bash $SK/setup.sh
+$PY -c "import cv2, arabic_reshaper, PIL" 2>/dev/null && [ -f ~/.cache/video-skills/models/yunet.onnx ] && echo ready || bash $SK/setup.sh
 ```
 Don't run two setup.sh at once (parallel pip installs collide); if another agent is setting up, wait for the check above to pass.
 
@@ -123,6 +123,12 @@ of the person to follow; usually the guest). Choosing to follow whoever is speak
 is a valid editorial choice, but verify will then list those frames, which is expected.
 `--angle-x` can be repeated (`--angle-x 2=420 --angle-x 3=447`).
 
+Faces are found with YuNet (OpenCV's small neural detector, installed by setup.sh): on a TV set with
+glasses and a mic in front of the face it found the face in every frame where Haar cascades found a
+third, and it ignores logos, headphones and wall lettering that Haar took for faces. Dissolves and
+zooms are split into separate shots (`DISSOLVE/ZOOM` in the log). faces.json is re-planned when
+`--track`/`--prefer` change; `--fresh` forces it (hand edits in faces.json survive plain re-runs).
+
 **Moving faces**: when the one person in a shot moves across the frame (handheld or zooming camera,
 a guest leaning in and out), facetrack prints `TRACKING ...` and that shot gets a crop that follows
 the face like a lazy camera operator (no jitter; fixed studio cameras stay fixed). It reports how
@@ -131,7 +137,8 @@ many sampled frames still have the face near the crop edge; look at those. `--tr
 **Burned-in subtitles** in the source: add `"keep_top": 0.83` to the plan (or to one clip). The 9:16
 crop then zooms to the top 83% of the frame, cutting off the caption band (a bit softer: ~2x upscale
 from 1080p). `--verify`
-must print **0 mismatches** otherwise; it checks every frame through the exact crop expression the
+must print **0 mismatches** otherwise, and its second line (face outside the middle 70% of the
+crop) should stay under ~3%; it checks every frame through the exact crop expression the
 renderer uses (camera count is automatic). Instagram reels
 max out at 3 min, so long TL;DRs ship as the full vertical file plus one reel per chapter. For a
 reels plan, the same render command with `--split-chapters reels/` writes one file per reel.

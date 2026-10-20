@@ -53,7 +53,7 @@ for fx in a.fixes:
 W.sort(key=lambda w: w[0]); starts = [w[0] for w in W]
 for s in T['sents']:                                          # rebuild sentence texts from the words (one bisect each)
     lo, hi = bisect.bisect_left(starts, s[0] - 0.001), bisect.bisect_right(starts, s[1] + 0.001)
-    s[2] = ' '.join(w[2] for w in W[lo:hi]) or s[2]
+    s[2] = ' '.join(w[2] for w in W[lo:hi])           # empty if every word was deleted
 save(T, p)
 with open(os.path.join(a.work, 'transcript.txt'), 'w', encoding='utf-8') as f:
     for i, s in enumerate(T['sents']):

@@ -249,6 +249,27 @@ def draw_words(draw, words, y, width, size, active=-1, color='white', hl=(255, 2
             xx += rw
         x = x - sp if rtl else x + w + sp
 
+def line_width(draw, words, size):
+    """Width draw_words() will use for this line (to size boxes and shrink lines that don't fit)."""
+    rtl = any(is_rtl(w) for w in words)
+    words = [clean_token(w) or w if is_rtl(w) else w for w in words]
+    sp = draw.textlength(' ', font=font('rtl' if rtl else 'latin', size)) * 1.4
+    tot = 0
+    for w in words:
+        for r in (script_runs(w) if needs_runs(w) else [w]):
+            tot += draw.textlength(shape(r), font=font_for(r, size))
+    return tot + sp * (len(words) - 1)
+
+def fit(draw, text, size, maxw, kind=None):
+    """Largest size <= size at which the line fits in maxw (long names on cards were clipped at both edges)."""
+    words = text.split()
+    while size > 18:
+        w = draw.textlength(shape(text), font=font(kind, size)) if kind else line_width(draw, words, size)
+        if w <= maxw:
+            break
+        size = int(size * 0.92)
+    return size
+
 def centred(draw, y, text, size, width, fill='white', kind=None, stroke=0):
     words = [w for w in text.split() if w]
     f = font(kind, size) if kind else None

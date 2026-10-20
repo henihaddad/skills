@@ -122,6 +122,23 @@ already in the scripts. If you change the scripts, don't reintroduce these.
 - **25 fps sources**: rendered segments are 30 fps, so frame indices differ by x1.2 when checking cuts.
 - A Scribe chunk returned 504 once; requests are now retried on 5xx/timeouts.
 
+## Found by the timed Safi Said run (IFM TV, Oct 2026)
+- **Haar cascades were the weak link.** With glasses and a mic in front of the face they found it in 14 of
+  46 frames, and fired on the station logo (IFMTV, top right), headphones on the desk and the "IFM"
+  lettering on the wall. Tracking then followed those and swung across the frame; the agent needed 7
+  facetrack runs and 5 hand edits. YuNet found the face in 46/46 frames at 8 ms vs 23 ms per frame; the
+  same plan now needs no hand edits (0 mismatches, face off-centre in 0.3% of sampled frames) and the first
+  run costs half the CPU. Tracking also keeps only the main chain of detections (stray hits dropped).
+- **The tracking trigger** first used max-min of all detections (fired on stray hits), then the 10-90
+  percentile (missed a handheld guest: face off-centre 11%). Now: max-min of the main chain > 0.2 crop widths.
+- **verify only checked camera consistency**, so a guest drifting out of a single-camera shot passed. It now
+  also reports how often the face is outside the middle 70% of the crop.
+- **The faces.json cache ignored --track**; a re-run with `--track off` silently reused tracked paths.
+- **Dissolves/zooms** have no hard cut, so both shots shared one crop. They're now split at the biggest change.
+- **Latin in --brand** was drawn with the Arabic font (boxes), and a long end-card line was clipped at
+  both edges. Tags/brand go word by word now; long card lines wrap (never inside a Latin name) or shrink.
+- **One black frame** started every reel (clip fade-in). 9:16 clips are hard-cut now.
+
 ## Extracting one person (diarization)
 - Speaker labels are only consistent within one request. Send up to 60 min in one diarized request (45 min took 60 s, $0.16).
 - Diarization merged a co-host's voice into the guest's label. Text alone didn't reliably catch it.

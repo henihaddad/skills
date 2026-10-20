@@ -26,7 +26,7 @@ What you get:
 """
 import argparse, os, re, sys
 from PIL import Image, ImageDraw
-from common import ff, load, clean_token, draw_words, centred, font, shape, is_rtl, duration, last_loud, venc, crop_expr
+from common import ff, load, clean_token, draw_words, centred, font, shape, is_rtl, duration, last_loud, venc, crop_expr, fit, line_width
 
 ap = argparse.ArgumentParser()
 ap.add_argument('plan')
@@ -89,25 +89,35 @@ def card_png(lines, path):
         # RTL lines go word by word (kind=None) so digits/Latin/"·" get a font that has them;
         # rendering a whole Arabic line in the Arabic font turns "4" or "·" into empty boxes.
         kind = 'serif' if (role == 'brand' and not is_rtl(t)) else (None if is_rtl(t) else 'latin')
-        centred(d, y, t, size, W, fill=col, kind=kind)
-        y += size * 1.5
+        sz = fit(d, t, size, W * 0.9, kind); parts = [t]
+        if sz < size * 0.7 and len(t.split()) > 2:      # too long: wrap onto two lines instead of shrinking a lot
+            ws = t.split()
+            ok = [c for c in range(1, len(ws)) if is_rtl(ws[c - 1]) or is_rtl(ws[c])] or list(range(1, len(ws)))   # don't split "Emission Impossible"
+            cut = min(ok, key=lambda c: abs(len(' '.join(ws[:c])) - len(' '.join(ws[c:]))))
+            parts = [' '.join(ws[:cut]), ' '.join(ws[cut:])]
+            sz = min(fit(d, q, size, W * 0.9, kind) for q in parts)
+        for q in parts:
+            centred(d, y, q, sz, W, fill=col, kind=kind); y += sz * 1.25
+        y += size * 1.5 - sz * 1.25
     im.save(path)
 
 def tag_png(chapter, path):
     im = Image.new('RGBA', (W, H), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
     if not chapter:
         im.save(path); return
-    kind = 'rtl' if is_rtl(chapter) else 'latin'; s = shape(chapter)
+    # word by word (draw_words), so Latin/digits mixed into an Arabic title or brand get a font with
+    # those glyphs (a whole-line Arabic font drew "Emission Impossible" as boxes)
+    words = chapter.split()
     if V:
-        f = font(kind, 52); w = d.textlength(s, font=f)
+        sz = fit(d, chapter, 52, W - 120); w = line_width(d, words, sz)
         d.rounded_rectangle([(W - w) / 2 - 36, 230, (W + w) / 2 + 36, 322], radius=24, fill=(0, 0, 0, 170))
-        d.text(((W - w) / 2, 238), s, font=f, fill=GOLD)
+        draw_words(d, words, 238 + (52 - sz) // 2, W, sz, color=GOLD, hl=GOLD, stroke=0)
         if a.brand:
-            centred(d, 340, a.brand, 34, W, fill='white', kind='rtl' if is_rtl(a.brand) else 'latin', stroke=3)
+            centred(d, 340, a.brand, fit(d, a.brand, 34, W - 80), W, fill='white', stroke=3)
     else:
-        f = font(kind, 28); w = d.textlength(s, font=f)
+        sz = fit(d, chapter, 28, W * 0.6); w = line_width(d, words, sz)
         d.rounded_rectangle([W - w - 70, 26, W - 30, 74], radius=12, fill=(0, 0, 0, 150))
-        d.text((W - w - 50, 32), s, font=f, fill=GOLD)
+        draw_words(d, words, 32, 2 * (W - 50) - w, sz, color=GOLD, hl=GOLD, stroke=0)
     im.save(path)
 
 def karaoke(st, du, k):
@@ -189,7 +199,7 @@ for k, it in enumerate(P['items']):
         ff(*HWDEC, '-ss', f'{st:.2f}', '-t', f'{du:.2f}', '-i', a.source, '-f', 'concat', '-safe', 0, '-i', lst,
            '-loop', 1, '-t', f'{du:.2f}', '-i', tg, '-filter_complex',
            f"[0:v]{crop_filter(it, k)}eq=contrast=1.1:saturation=0.88,vignette=PI/5,fps={FPS},"
-           f"fade=in:st=0:d=0.12,fade=out:st={du - 0.18:.2f}:d=0.18[v];"
+           f"{'' if V else 'fade=in:st=0:d=0.12,'}fade=out:st={du - 0.18:.2f}:d=0.18[v];"
            f"[1:v]format=rgba,setpts=PTS-STARTPTS[s];[v][s]overlay=0:0:eof_action=repeat[v2];[v2][2:v]overlay=0:0,format=yuv420p[vo];"
            f"[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=1.15,afade=t=in:d=0.08,afade=t=out:st={du - 0.18:.2f}:d=0.18[ao]",
            '-map', '[vo]', '-map', '[ao]', *venc('normal' if V else 'high'), '-c:a', 'aac', '-ar', 44100, o)
